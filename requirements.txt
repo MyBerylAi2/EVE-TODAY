@@ -1,0 +1,7 @@
+kokoro>=0.3
+soundfile
+torch
+groq
+numpy
+gradio>=4.0
+huggingface_hub

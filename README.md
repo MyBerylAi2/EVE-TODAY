@@ -1,12 +1,13 @@
 ---
-title: Eve Voice Engine
+title: EVE Voice Engine
 emoji: 🔥
-colorFrom: red
-colorTo: yellow
+colorFrom: yellow
+colorTo: gray
 sdk: gradio
-sdk_version: 6.6.0
+sdk_version: 5.0.0
 app_file: app.py
-pinned: false
+pinned: true
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+# EVE Voice Engine · Beryl AI Labs
+Bidirectional live voice conversation with EVE.
