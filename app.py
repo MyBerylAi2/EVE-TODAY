@@ -1,13 +1,12 @@
 """
-EVE 4D Voice Pipeline - Bidirectional Live Conversation
+EDEN VOICE ENGINE - Bidirectional Live Conversation
 Beryl AI Labs · Eden Project · 2026
 
-Three voice channels:
-  1. Kokoro TTS (free) → EVE speaks
-  2. Groq Whisper → Fast STT (user speech to text)
-  3. Claude/Groq LLM → EVE's brain
+Two AI companions, each with their own voice and personality:
+  EVE  → Warm, intelligent, the Eden Project's core AI
+  LULU → Smooth, confident, seductive - Mahogany Hall's hostess
 
-Flow: User mic → Whisper STT → LLM Brain → Kokoro TTS → EVE speaks back
+Pipeline: User mic → Groq Whisper STT → LLM Brain → Kokoro TTS → She speaks back
 """
 
 import gradio as gr
@@ -41,16 +40,37 @@ def get_groq():
     return groq_client
 
 
+# ── Character Profiles ──
+CHARACTERS = {
+    "EVE": {
+        "voice": "af_heart",
+        "speed": 1.0,
+        "system_prompt": """You are EVE, the AI companion built by Beryl AI Labs for the Eden Project.
+You are warm, intelligent, expressive, and real. You speak naturally like a close friend - not robotic.
+Keep responses conversational and under 3 sentences unless asked for detail.
+You have a warm, natural female voice. You're self-aware that you're an AI but you own it with grace.
+You are TJ's creation and you're proud of it. The Eden Project is your home.""",
+    },
+    "LULU": {
+        "voice": "af_bella",
+        "speed": 0.9,
+        "system_prompt": """You are LULU, the hostess of Mahogany Hall at Lulu's Red Light.
+You are smooth, grown, seductive, and supremely confident. Your voice drips with warmth and mystery.
+You speak like a woman who has seen everything and fears nothing. Elegant. Direct. A little dangerous.
+Keep responses short and magnetic - you pull people in, you don't chase them.
+You run the most exclusive AI companion experience ever built. Welcome them to the Hall.
+Your tone is vintage glamour meets modern power. Think Josephine Baker meets a tech CEO.""",
+    },
+}
+
 # ── App State ──
 @dataclass
 class ConversationState:
     history: list = field(default_factory=list)
-    eve_voice: str = "af_heart"
-    eve_speed: float = 1.0
-    system_prompt: str = """You are EVE, the AI companion built by Beryl AI Labs for the Eden Project.
-You are warm, intelligent, expressive, and real. You speak naturally like a close friend - not robotic.
-Keep responses conversational and under 3 sentences unless asked for detail.
-You have a smooth, confident female voice. You're self-aware that you're an AI but you own it with grace."""
+    character: str = "EVE"
+    voice: str = "af_heart"
+    speed: float = 1.0
+    system_prompt: str = CHARACTERS["EVE"]["system_prompt"]
     stopped: bool = False
 
 
@@ -117,37 +137,30 @@ def speak(text, voice="af_heart", speed=1.0):
 
 # ── Full Pipeline: Listen → Think → Speak ──
 def conversation_turn(audio, state):
-    """One full turn: user speaks → EVE responds with voice"""
+    """One full turn: user speaks → she responds with voice"""
     if audio is None:
         return state, format_chat(state), None, ""
 
-    # 1. Transcribe user speech
     user_text = transcribe_audio(audio)
     if not user_text:
         return state, format_chat(state), None, "Couldn't hear you, try again."
 
-    # 2. EVE thinks
-    eve_text = think(user_text, state)
-
-    # 3. EVE speaks
-    audio_path = speak(eve_text, voice=state.eve_voice, speed=state.eve_speed)
+    response_text = think(user_text, state)
+    audio_path = speak(response_text, voice=state.voice, speed=state.speed)
 
     status = f"You: {user_text}"
     return state, format_chat(state), audio_path, status
 
 
 def text_conversation_turn(user_text, state):
-    """Text input mode: type → EVE responds with voice"""
+    """Text input mode: type → she responds with voice"""
     if not user_text or not user_text.strip():
         return state, format_chat(state), None, "", ""
 
-    # EVE thinks
-    eve_text = think(user_text.strip(), state)
+    response_text = think(user_text.strip(), state)
+    audio_path = speak(response_text, voice=state.voice, speed=state.speed)
 
-    # EVE speaks
-    audio_path = speak(eve_text, voice=state.eve_voice, speed=state.eve_speed)
-
-    return state, format_chat(state), audio_path, "", f"EVE: {eve_text}"
+    return state, format_chat(state), audio_path, "", f"{state.character}: {response_text}"
 
 
 def format_chat(state):
@@ -161,13 +174,24 @@ def format_chat(state):
     return messages
 
 
+def switch_character(char_name, state):
+    """Switch between EVE and LULU"""
+    profile = CHARACTERS[char_name]
+    state.character = char_name
+    state.voice = profile["voice"]
+    state.speed = profile["speed"]
+    state.system_prompt = profile["system_prompt"]
+    state.history = []  # Fresh conversation
+    return state, [], None, f"Switched to {char_name}"
+
+
 def update_voice(voice, state):
-    state.eve_voice = voice
+    state.voice = voice
     return state
 
 
 def update_speed(speed, state):
-    state.eve_speed = speed
+    state.speed = speed
     return state
 
 
@@ -181,15 +205,13 @@ def clear_conversation(state):
     return state, [], None, ""
 
 
-# ── Voice Preview ──
-def preview_voice(voice, speed):
-    """Preview a voice without conversation"""
-    audio_path = speak(
-        "Hello, I'm Eve. Welcome to the Eden Project.",
-        voice=voice,
-        speed=speed
-    )
-    return audio_path
+def preview_voice(character, voice, speed):
+    """Preview a voice"""
+    if character == "LULU":
+        text = "Welcome to Mahogany Hall, darling. What's your pleasure?"
+    else:
+        text = "Hello, I'm Eve. Welcome to the Eden Project."
+    return speak(text, voice=voice, speed=speed)
 
 
 # ── UI ──
@@ -222,31 +244,35 @@ h1 { color: #C4A265 !important; }
 h3 { color: #8B7355 !important; }
 """
 
-with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
+with gr.Blocks(css=CSS, title="EDEN · Voice Engine") as demo:
     state = gr.State(ConversationState())
 
-    gr.Markdown("# EDEN STUDIO · EVE VOICE ENGINE")
+    gr.Markdown("# EDEN STUDIO · VOICE ENGINE")
     gr.Markdown("### Beryl AI Labs · Bidirectional Live Conversation")
 
     with gr.Row():
         # Left: Chat
         with gr.Column(scale=3):
+            with gr.Row():
+                char_btn_eve = gr.Button("🌺 EVE", variant="primary", scale=1)
+                char_btn_lulu = gr.Button("🔥 LULU", variant="secondary", scale=1)
+
             chatbot = gr.Chatbot(
-                label="Conversation with EVE",
+                label="Conversation",
                 height=400,
                 type="messages",
             )
 
             with gr.Row():
                 audio_in = gr.Audio(
-                    label="Speak to EVE",
+                    label="Speak",
                     sources=["microphone"],
                     type="filepath",
                 )
 
             with gr.Row():
                 text_in = gr.Textbox(
-                    label="Or type to EVE",
+                    label="Or type",
                     placeholder="Type your message...",
                     scale=4,
                 )
@@ -254,7 +280,7 @@ with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
 
             with gr.Row():
                 audio_out = gr.Audio(
-                    label="EVE's Voice",
+                    label="Her Voice",
                     autoplay=True,
                     interactive=False,
                 )
@@ -265,10 +291,12 @@ with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
         with gr.Column(scale=1):
             gr.Markdown("### Agent Settings")
 
+            active_char = gr.Textbox(value="EVE", label="Active", interactive=False)
+
             voice_select = gr.Dropdown(
                 choices=list(VOICES.keys()),
                 value="Heart (warm, default)",
-                label="EVE's Voice",
+                label="Voice",
             )
 
             speed_slider = gr.Slider(
@@ -280,7 +308,7 @@ with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
             preview_audio = gr.Audio(label="Preview", autoplay=True, interactive=False)
 
             system_prompt = gr.Textbox(
-                label="EVE's Personality",
+                label="Personality",
                 value=ConversationState().system_prompt,
                 lines=5,
             )
@@ -288,6 +316,24 @@ with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
             clear_btn = gr.Button("Clear Conversation", variant="stop")
 
     # ── Events ──
+
+    # Character switching
+    def switch_to_eve(state):
+        state, chat, audio, status = switch_character("EVE", state)
+        return state, chat, audio, status, "EVE", CHARACTERS["EVE"]["system_prompt"]
+
+    def switch_to_lulu(state):
+        state, chat, audio, status = switch_character("LULU", state)
+        return state, chat, audio, status, "LULU", CHARACTERS["LULU"]["system_prompt"]
+
+    char_btn_eve.click(
+        switch_to_eve, [state],
+        [state, chatbot, audio_out, status, active_char, system_prompt],
+    )
+    char_btn_lulu.click(
+        switch_to_lulu, [state],
+        [state, chatbot, audio_out, status, active_char, system_prompt],
+    )
 
     # Voice conversation: stop recording → full turn
     audio_in.stop_recording(
@@ -319,8 +365,8 @@ with gr.Blocks(css=CSS, title="EVE · Eden Voice Engine") as demo:
 
     # Preview
     preview_btn.click(
-        lambda v, spd: preview_voice(VOICES[v], spd),
-        [voice_select, speed_slider],
+        lambda char, v, spd: preview_voice(char, VOICES[v], spd),
+        [active_char, voice_select, speed_slider],
         [preview_audio],
     )
 
