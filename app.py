@@ -1685,7 +1685,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
     }
     .eve-step-arrow { color: #ccc; font-size: 1.2em; }
 
-    /* Mic button — big, centered, the main action */
+    /* Mic button — big, centered, mic icon */
     .eve-mic-btn {
         display: flex; flex-direction: column; align-items: center;
         justify-content: center; padding: 8px 0;
@@ -1705,6 +1705,14 @@ def build_playground(default_engine="kokoro", animate_face=True):
         box-shadow: 0 6px 30px rgba(196, 77, 255, 0.5) !important;
         transition: transform 0.2s ease, box-shadow 0.2s ease !important;
         cursor: pointer;
+        font-size: 0 !important;       /* hide "Record" text */
+        color: transparent !important;
+    }
+    /* Mic icon via pseudo-element */
+    .eve-mic-btn button::before {
+        content: "🎤";
+        font-size: 38px;
+        display: block;
     }
     .eve-mic-btn button:hover {
         transform: scale(1.1) !important;
@@ -2143,7 +2151,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     )
 
                     gr.HTML("""<div class="eve-steps">
-                        <span class="eve-step">1. Tap the mic</span>
+                        <span class="eve-step">1. Tap 🎤 below</span>
                         <span class="eve-step-arrow">&rarr;</span>
                         <span class="eve-step">2. Allow microphone</span>
                         <span class="eve-step-arrow">&rarr;</span>
