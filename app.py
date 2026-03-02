@@ -1345,32 +1345,30 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     outputs=[live_portrait, live_video, live_transcript, live_status],
                 )
 
-                # On app load, swap in idle animation when ready
-                _idle_shown = [False]
+            except Exception as _rtc_err:
+                live_portrait = None
+                live_video = None
+                live_status = None
+                gr.Markdown(
+                    f"**WebRTC unavailable**: `{_rtc_err}`\n\n"
+                    "Use the Chat Mode tab for text/voice conversation."
+                )
 
+            # Idle animation check — runs once on page load
+            if live_portrait and live_video and live_status:
                 def _check_idle():
-                    """Swap in idle animation video once it's ready."""
-                    if _idle_shown[0]:
-                        return (gr.update(), gr.update(), gr.update())
+                    """Swap in idle animation video if ready when page loads."""
                     if _idle_video[0] and os.path.isfile(str(_idle_video[0])):
-                        _idle_shown[0] = True
                         return (
                             gr.update(visible=False),
                             gr.update(value=_idle_video[0], visible=True),
                             "EVE is here — speak to her",
                         )
-                    return (gr.update(), gr.update(), "Waking up...")
+                    return (gr.update(), gr.update(), gr.update())
 
                 app.load(
                     fn=_check_idle,
                     outputs=[live_portrait, live_video, live_status],
-                    every=10,
-                )
-
-            except Exception as _rtc_err:
-                gr.Markdown(
-                    f"**WebRTC unavailable**: `{_rtc_err}`\n\n"
-                    "Use the Chat Mode tab for text/voice conversation."
                 )
 
          # ═══════════════════════════════════════════════════════════
