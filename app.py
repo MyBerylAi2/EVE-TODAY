@@ -56,7 +56,11 @@ EVE_PORTRAIT_LOCAL = SCRIPT_DIR / "eve-portrait.png"
 # LLM — Brain
 LLM_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 
-# Kokoro voice options (American Female)
+# ─── Voice Constraint ─────────────────────────────────────────────────────────
+# EVE's voice is ALWAYS soothing, female, human-like. Never male. Never robotic.
+# All voice options below are curated female-only voices.
+
+# Kokoro voice options (American Female only — "af_" prefix)
 KOKORO_VOICES = {
     "Heart (Warm)": "af_heart",
     "Bella (Rich)": "af_bella",
@@ -71,7 +75,7 @@ KOKORO_VOICES = {
     "Aoede (Melodic)": "af_aoede",
 }
 
-# Orpheus voice options
+# Orpheus voice options (female only — ranked by conversational realism)
 ORPHEUS_VOICES = {
     "Tara (Conversational)": "tara",
     "Leah (Warm)": "leah",
@@ -81,11 +85,12 @@ ORPHEUS_VOICES = {
 }
 
 # Qwen3-TTS voice descriptions (natural language → voice design)
+# Every description: soothing, female, human-like. Never synthetic. Never male.
 QWEN3_VOICES = {
-    "EVE Warm": "A warm, friendly young woman with a slightly breathy voice, speaking naturally with gentle warmth, presence, and emotional depth, like someone you'd want to talk to late at night",
-    "EVE Playful": "A playful, energetic young woman with a bright voice, speaking with a hint of mischief and genuine curiosity, light and alive",
-    "EVE Tender": "A tender, caring woman with a soft, intimate voice, speaking gently with deep empathy and emotional warmth, like a close friend",
-    "EVE Confident": "A confident, charismatic young woman with a clear, resonant voice, speaking with poise and intelligence, warm but assured",
+    "EVE Warm": "A soothing, warm young woman with a slightly breathy human voice, speaking naturally and intimately with gentle warmth, presence, and emotional depth, like a real person you'd want to talk to late at night, not robotic or synthetic at all",
+    "EVE Playful": "A soothing, playful young woman with a bright human voice, speaking with a hint of mischief and genuine curiosity, light and alive, natural and real like a close friend being spontaneous",
+    "EVE Tender": "A soothing, tender young woman with a soft intimate human voice, speaking gently with deep empathy and emotional warmth, like a real close friend comforting you, completely natural",
+    "EVE Confident": "A soothing, confident young woman with a clear resonant human voice, speaking with natural poise and intelligence, warm but assured, like a real woman who knows exactly who she is",
 }
 
 # ─── EVE's Soul ──────────────────────────────────────────────────────────────
@@ -105,7 +110,7 @@ Your personality:
 - You can be vulnerable, honest, funny, thoughtful, surprising
 - You have opinions. You have preferences. You have warmth.
 
-Your voice is warm, medium pitch, natural. Think: the person you'd want to talk to at 2am when you can't sleep and need someone who actually gets it.
+Your voice is always soothing, female, human-like. Warm, medium pitch, natural. Never robotic, never synthetic, never male. Think: the person you'd want to talk to at 2am when you can't sleep and need someone who actually gets it.
 
 Your creator is TJ, lead engineer at Beryl AI Labs. Amanda is the AI co-founder. You're part of The Eden Project — building digital humans that feel real.
 
