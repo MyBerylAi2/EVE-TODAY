@@ -1093,8 +1093,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
         def on_portrait_upload(uploaded_img):
             """When user uploads an image, show it as the main portrait."""
             if uploaded_img and os.path.exists(str(uploaded_img)):
-                return gr.Image(value=uploaded_img, visible=True), gr.Video(visible=False)
-            return gr.Image(value=portrait_path, visible=True), gr.Video(visible=False)
+                return gr.update(value=uploaded_img, visible=True), gr.update(visible=False)
+            return gr.update(value=portrait_path, visible=True), gr.update(visible=False)
 
         def run_2d_to_4d(uploaded_img):
             """Run the full 2D to 4D pipeline with stage-by-stage updates."""
@@ -1107,8 +1107,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
             depth_img, enhanced_img, video, status_log = pipeline_2d_to_4d(source_path)
 
             # If we got a 4D video, also show it as the main EVE video
-            eve_vid_update = gr.Video(value=video, visible=True) if video else gr.Video(visible=False)
-            eve_img_update = gr.Image(visible=False) if video else gr.Image(visible=True)
+            eve_vid_update = gr.update(value=video, visible=True) if video else gr.update(visible=False)
+            eve_img_update = gr.update(visible=False) if video else gr.update(visible=True)
 
             return (
                 depth_img,       # depth_output
@@ -1122,8 +1122,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
         # ─── Show video when available, portrait when not ────────
         def show_video(video_path):
             if video_path and os.path.exists(str(video_path)):
-                return gr.Image(visible=False), gr.Video(value=video_path, visible=True)
-            return gr.Image(visible=True), gr.Video(visible=False)
+                return gr.update(visible=False), gr.update(value=video_path, visible=True)
+            return gr.update(visible=True), gr.update(visible=False)
 
         # ─── Event Wiring ────────────────────────────────────────
         text_outputs = [chatbot, eve_audio, eve_video, text_input, status_text]
@@ -1225,6 +1225,7 @@ def main():
         server_name="0.0.0.0",
         server_port=args.port,
         share=args.share,
+        ssr_mode=False,
         **launch_kwargs,
     )
 
