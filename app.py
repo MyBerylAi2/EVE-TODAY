@@ -1803,10 +1803,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
         Uses AdditionalOutputs to update face display, transcript, and status.
         Security: WebRTC is point-to-point encrypted. Input is validated and sanitized."""
         from fastrtc.utils import AdditionalOutputs
-        live_history = [
-            # EVE already greeted on page load — she knows the user is here
-            {"role": "assistant", "content": "Hey TJ, please wait while I sync with your API. I'm worth the wait."},
-        ]
+        live_history = []  # Empty — EVE greets fresh on first speak
         _first_reply = [True]  # Track first real interaction
         transcript_lines = []
         _session_id = [None]  # track single session
@@ -2085,7 +2082,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
                     # Status — EVE's message to you
                     live_status = gr.HTML(
-                        value='<div class="eve-status">Give me a moment to sync with your API — I\'m worth the wait.</div>',
+                        value='<div class="eve-status">I\'m here, TJ. Tap the mic and say hello. ✨</div>',
                     )
 
                     # Mic button — big, centered, obvious
@@ -2126,12 +2123,6 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         interactive=False, lines=4, max_lines=8,
                     )
 
-                # Hidden audio for greeting playback
-                live_greeting_audio = gr.Audio(
-                    visible=False, autoplay=True, label="Greeting",
-                    show_download_button=False,
-                )
-
                 # Wire WebRTC with AdditionalOutputs:
                 # Handler yields audio to live_webrtc, plus
                 # AdditionalOutputs(portrait, video, transcript, status)
@@ -2161,68 +2152,20 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     "Use the Chat Mode tab for text/voice conversation."
                 )
 
-            # Page load: show idle animation, then greet after 15s
+            # Page load: portrait shows instantly, status guides TJ to tap mic.
+            # Greeting audio plays on first speak via WebRTC (bypasses Chrome autoplay block).
             if live_portrait and live_video and live_status:
                 def _on_page_load():
-                    """Fast load: portrait shows instantly, greeting plays as soon as audio ready."""
-                    import time as _t
-
-                    # Yield 1: Portrait IMMEDIATELY — no waiting for anything
+                    """Instant load — portrait + status. No blocking, no autoplay tricks."""
                     yield (
                         gr.update(value=portrait_path, visible=True),
                         gr.update(visible=False),
-                        '<div class="eve-status">Give me a moment to sync — I\'m worth the wait.</div>',
-                        gr.update(),
-                    )
-
-                    # Wait for greeting audio (Kokoro is <0.3s so this is fast)
-                    for _ in range(15):
-                        if _greeting_audio[0] and os.path.isfile(str(_greeting_audio[0])):
-                            break
-                        _t.sleep(1)
-
-                    if not (_greeting_audio[0] and os.path.isfile(str(_greeting_audio[0]))):
-                        # Audio not ready — EVE stays on portrait, status updates
-                        yield (
-                            gr.update(),
-                            gr.update(visible=False),
-                            '<div class="eve-status">I\'m here. Tap the mic and talk to me.</div>',
-                            gr.update(),
-                        )
-                        return
-
-                    # Yield 2: Play greeting audio over portrait immediately
-                    yield (
-                        gr.update(value=portrait_path, visible=True),
-                        gr.update(visible=False),
-                        '<div class="eve-status"></div>',
-                        gr.update(value=_greeting_audio[0], visible=False),
-                    )
-
-                    # Wait for greeting duration (~4s) then check if video ready
-                    _t.sleep(5)
-
-                    # Yield 3: If lip-sync video arrived, show it. Otherwise stay on portrait.
-                    if _greeting_video[0] and os.path.isfile(str(_greeting_video[0])):
-                        yield (
-                            gr.update(visible=False),
-                            gr.update(value=_greeting_video[0], visible=True, loop=False),
-                            '<div class="eve-status"></div>',
-                            gr.update(),
-                        )
-                        _t.sleep(7)  # let video play through
-
-                    # Yield 4: EVE waiting patiently — portrait, status prompt
-                    yield (
-                        gr.update(value=portrait_path, visible=True),
-                        gr.update(visible=False),
-                        '<div class="eve-status">I\'m here. Tap the mic and talk to me.</div>',
-                        gr.update(),
+                        '<div class="eve-status">I\'m here, TJ. Tap the mic and say hello. ✨</div>',
                     )
 
                 app.load(
                     fn=_on_page_load,
-                    outputs=[live_portrait, live_video, live_status, live_greeting_audio],
+                    outputs=[live_portrait, live_video, live_status],
                 )
 
          # ═══════════════════════════════════════════════════════════
