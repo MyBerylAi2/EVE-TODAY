@@ -18,14 +18,22 @@ Talk to EVE. She listens, thinks, speaks, and shows her face.
 
 ## Pipeline
 ```
-You speak → Whisper STT → Llama Brain → Kokoro TTS → KDTalker Face → EVE responds
+You speak → Whisper STT → Llama 3.3 Brain → Voice Engine → KDTalker Face → EVE responds
 ```
+
+## Voice Engines
+- **Qwen3-TTS** (default) — 97ms streaming, natural language voice design
+- **Kokoro 82M** — <0.3s, af_heart warm female
+- **Orpheus 3B** — ~200ms, emotion tags, human-like
+- **Dia 1.6B** — Ultra-realistic dialogue with nonverbal
+- **Chatterbox** — Voice cloning
 
 ## Features
 - Voice input (microphone) or text input
 - LLM-powered conversation (Llama 3.3 70B)
-- Natural voice synthesis (Kokoro TTS)
+- 5 voice engines with auto-fallback
 - Animated face responses (KDTalker)
 - Conversation memory
+- Warm, emotionally intelligent personality (HER 2013 inspired)
 
-Built with the Eden Protocol. HER (2013) inspired.
+Built with the Eden Protocol by Beryl AI Labs.
