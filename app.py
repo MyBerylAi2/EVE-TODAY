@@ -586,60 +586,91 @@ def eve_speak(text, engine="kokoro", voice_id=None):
 
 
 # ─── Face Animation: KDTalker (with backup chain) ───────────────────────────
+
+def _extract_video_path(result):
+    """Extract video file path from various Gradio result formats."""
+    if isinstance(result, str) and (result.endswith(".mp4") or result.endswith(".webm")):
+        return result
+    if isinstance(result, dict):
+        for key in ("video", "path", "url", "value"):
+            v = result.get(key)
+            if isinstance(v, str) and v:
+                return v
+            if isinstance(v, dict):
+                sub = _extract_video_path(v)
+                if sub:
+                    return sub
+    if isinstance(result, (list, tuple)):
+        for item in result:
+            v = _extract_video_path(item)
+            if v:
+                return v
+    return None
+
+
 def eve_animate(portrait_path, audio_path):
-    """Render EVE's face animation. Cascades through ANIMATION_SPACES backups."""
+    """Render EVE's face animation via gradio_client. Cascades through ANIMATION_SPACES."""
     from gradio_client import Client, handle_file
+    import traceback
 
     log("Animating face...", "PIPE")
+    log(f"Portrait: {portrait_path} (exists={os.path.isfile(str(portrait_path))}, "
+        f"size={os.path.getsize(portrait_path) if os.path.isfile(str(portrait_path)) else 0})", "INFO")
+    log(f"Audio: {audio_path} (exists={os.path.isfile(str(audio_path))}, "
+        f"size={os.path.getsize(audio_path) if os.path.isfile(str(audio_path)) else 0})", "INFO")
 
     for space_cfg in ANIMATION_SPACES:
-        try:
-            log(f"Trying {space_cfg['name']}...", "PIPE")
-            try:
-                client = Client(space_cfg["name"], token=HF_TOKEN)
-            except Exception:
-                if space_cfg.get("url"):
-                    client = Client(space_cfg["url"], token=HF_TOKEN)
-                else:
-                    raise
+        space_name = space_cfg["name"]
+        api_name = space_cfg["api"]
 
+        try:
+            log(f"Trying {space_name}...", "PIPE")
+
+            # Connect to space (try name first, then direct URL)
+            client = None
+            for addr in [space_name, space_cfg.get("url")]:
+                if not addr:
+                    continue
+                try:
+                    log(f"  Connecting to {addr}...", "INFO")
+                    client = Client(addr, token=HF_TOKEN)
+                    log(f"  Connected to {addr}", "OK")
+                    break
+                except Exception as ce:
+                    log(f"  Connection to {addr} failed: {ce}", "WARN")
+
+            if not client:
+                log(f"  Could not connect to {space_name}", "WARN")
+                continue
+
+            # Build call parameters
             start = time.time()
             params_fn = space_cfg.get("params")
             if params_fn:
                 kwargs = params_fn(handle_file(portrait_path), handle_file(audio_path))
-                result = client.predict(**kwargs, api_name=space_cfg["api"])
+                log(f"  Calling {api_name} with kwargs: {list(kwargs.keys())}", "INFO")
+                result = client.predict(**kwargs, api_name=api_name)
             else:
+                log(f"  Calling {api_name} with positional args", "INFO")
                 result = client.predict(
                     handle_file(portrait_path),
                     handle_file(audio_path),
-                    api_name=space_cfg["api"],
+                    api_name=api_name,
                 )
             elapsed = time.time() - start
-            log(f"Animation result type={type(result).__name__}: {str(result)[:200]}", "INFO")
+            log(f"  Result ({elapsed:.1f}s) type={type(result).__name__}: {str(result)[:300]}", "INFO")
 
-            video_path = None
-            if isinstance(result, str):
-                video_path = result
-            elif isinstance(result, dict):
-                # Gradio client returns {'video': '/tmp/...mp4', 'subtitles': ...}
-                video_path = result.get("video") or result.get("path")
-            elif isinstance(result, (tuple, list)):
-                for item in result:
-                    if isinstance(item, str):
-                        video_path = item
-                        break
-                    if isinstance(item, dict):
-                        video_path = item.get("video") or item.get("path")
-                        if video_path:
-                            break
-
-            if video_path:
-                log(f"Face animated via {space_cfg['name']} ({elapsed:.1f}s) -> {video_path}", "OK")
+            # Extract video path from result
+            video_path = _extract_video_path(result)
+            if video_path and os.path.isfile(str(video_path)):
+                fsize = os.path.getsize(video_path)
+                log(f"Face animated via {space_name} ({elapsed:.1f}s, {fsize} bytes) -> {video_path}", "OK")
                 return str(video_path)
             else:
-                log(f"Animation returned no extractable video path", "WARN")
+                log(f"  No local video file from {space_name} (extracted={video_path})", "WARN")
         except Exception as e:
-            log(f"{space_cfg['name']} failed: {e}", "WARN")
+            tb = traceback.format_exc()
+            log(f"{space_name} failed: {type(e).__name__}: {e}\n{tb}", "WARN")
 
     log("All animation spaces failed", "ERR")
     return None
@@ -938,7 +969,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
             except Exception as e:
                 log(f"Face animation skipped: {e}", "WARN")
 
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
+        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'Animated' if video_path else ('Pending' if do_animate else 'Off')}"
 
         if video_path:
             return (chat_history, audio_path,
@@ -1231,6 +1262,74 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 eve_video,
             ],
         )
+
+        # ─── Diagnostic Test (hidden API endpoint) ────────────────
+        def test_animation():
+            """Test animation pipeline and return diagnostic info."""
+            import traceback
+            report = []
+            report.append(f"Portrait: {portrait_path}")
+            report.append(f"Portrait exists: {os.path.isfile(str(portrait_path))}")
+            if os.path.isfile(str(portrait_path)):
+                report.append(f"Portrait size: {os.path.getsize(portrait_path)} bytes")
+
+            # Generate a short test audio
+            report.append("\n--- Testing voice generation ---")
+            try:
+                test_audio = eve_speak("Hello, testing.", engine="kokoro")
+                report.append(f"Voice result: {test_audio}")
+                if test_audio and os.path.isfile(str(test_audio)):
+                    report.append(f"Audio size: {os.path.getsize(test_audio)} bytes")
+                else:
+                    report.append("Voice failed — no audio file")
+                    return "\n".join(report)
+            except Exception as e:
+                report.append(f"Voice error: {traceback.format_exc()}")
+                return "\n".join(report)
+
+            # Test animation
+            report.append("\n--- Testing animation ---")
+            for space_cfg in ANIMATION_SPACES:
+                name = space_cfg["name"]
+                report.append(f"\n[{name}]")
+                try:
+                    from gradio_client import Client, handle_file
+                    report.append(f"  Connecting...")
+                    addr = space_cfg.get("url") or name
+                    client = Client(addr, token=HF_TOKEN)
+                    report.append(f"  Connected to {addr}")
+
+                    params_fn = space_cfg.get("params")
+                    if params_fn:
+                        kwargs = params_fn(handle_file(portrait_path), handle_file(test_audio))
+                        report.append(f"  Calling {space_cfg['api']} with kwargs: {list(kwargs.keys())}")
+                        result = client.predict(**kwargs, api_name=space_cfg["api"])
+                    else:
+                        report.append(f"  Calling {space_cfg['api']} with positional args")
+                        result = client.predict(
+                            handle_file(portrait_path),
+                            handle_file(test_audio),
+                            api_name=space_cfg["api"],
+                        )
+                    report.append(f"  Result type: {type(result).__name__}")
+                    report.append(f"  Result: {str(result)[:300]}")
+
+                    video = _extract_video_path(result)
+                    report.append(f"  Extracted video: {video}")
+                    if video and os.path.isfile(str(video)):
+                        report.append(f"  Video size: {os.path.getsize(video)} bytes — SUCCESS")
+                        return "\n".join(report)
+                    else:
+                        report.append(f"  Video file not found locally")
+                except Exception as e:
+                    report.append(f"  Error: {traceback.format_exc()}")
+
+            return "\n".join(report)
+
+        # Wire up diagnostic (no visible UI, just API)
+        _diag_btn = gr.Button("Test Animation", visible=False)
+        _diag_output = gr.Textbox(visible=False)
+        _diag_btn.click(fn=test_animation, outputs=[_diag_output])
 
     # Store Gradio 6 launch kwargs for theme/css
     app._eve_launch_kwargs = _launch_kwargs
