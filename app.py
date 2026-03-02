@@ -43,6 +43,8 @@ from datetime import datetime
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", None)
+XAI_API_KEY = os.environ.get("XAI_API_KEY", None)
 SCRIPT_DIR = Path(__file__).parent.resolve()
 VOICES_DIR = SCRIPT_DIR / "voices"
 VIDEOS_DIR = SCRIPT_DIR / "videos"
@@ -279,110 +281,178 @@ def extract_audio_path(result):
 
 # ─── STT: Speech to Text ────────────────────────────────────────────────────
 def transcribe_audio(audio_path):
-    """Transcribe audio via HF Inference API (Whisper)."""
-    from huggingface_hub import InferenceClient
-
-    log("Transcribing speech...", "PIPE")
-    client = InferenceClient(token=HF_TOKEN)
+    """Transcribe audio — Groq Whisper (~0.3s) → HF Inference API fallback."""
+    import requests as _req
 
     start = time.time()
-    result = client.automatic_speech_recognition(
-        audio=audio_path,
-        model="openai/whisper-large-v3-turbo",
-    )
-    elapsed = time.time() - start
 
-    text = result.text if hasattr(result, "text") else str(result)
-    log(f"STT ({elapsed:.1f}s): \"{text}\"", "OK")
-    return text
+    # Primary: Groq Whisper (fast, reliable)
+    if GROQ_API_KEY:
+        try:
+            log("STT: Groq Whisper...", "PIPE")
+            with open(audio_path, "rb") as f:
+                r = _req.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    files={"file": (os.path.basename(audio_path), f, "audio/wav")},
+                    data={"model": "whisper-large-v3-turbo", "language": "en"},
+                    timeout=15,
+                )
+            if r.status_code == 200:
+                text = r.json().get("text", "").strip()
+                log(f"STT Groq ({time.time()-start:.1f}s): \"{text[:60]}\"", "OK")
+                return text
+            log(f"Groq STT error {r.status_code}: {r.text[:100]}", "WARN")
+        except Exception as e:
+            log(f"Groq STT failed: {e}", "WARN")
+
+    # Fallback: HF Inference API
+    try:
+        log("STT: HF Whisper (fallback)...", "PIPE")
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_TOKEN)
+        result = client.automatic_speech_recognition(
+            audio=audio_path, model="openai/whisper-large-v3-turbo",
+        )
+        text = result.text if hasattr(result, "text") else str(result)
+        log(f"STT HF ({time.time()-start:.1f}s): \"{text[:60]}\"", "OK")
+        return text
+    except Exception as e:
+        log(f"HF STT failed: {e}", "ERR")
+        return ""
 
 
 # ─── Brain: LLM ─────────────────────────────────────────────────────────────
+def _build_messages(user_message, conversation_history):
+    msgs = [{"role": "system", "content": EVE_SYSTEM_PROMPT}]
+    msgs.extend(conversation_history[-10:])
+    msgs.append({"role": "user", "content": user_message})
+    return msgs
+
+
 def eve_think(user_message, conversation_history):
-    """Generate EVE's response via HF Inference API (Llama 3.3 70B)."""
-    from huggingface_hub import InferenceClient
+    """Generate EVE's response — xAI Grok-3 → Groq Llama → HF fallback."""
+    import requests as _req, json as _json
 
     log(f"EVE thinking: \"{user_message[:60]}\"...", "PIPE")
-    client = InferenceClient(token=HF_TOKEN)
-
-    messages = [{"role": "system", "content": EVE_SYSTEM_PROMPT}]
-    for turn in conversation_history[-10:]:
-        messages.append(turn)
-    messages.append({"role": "user", "content": user_message})
-
+    messages = _build_messages(user_message, conversation_history)
     start = time.time()
-    response = client.chat_completion(
-        model=LLM_MODEL,
-        messages=messages,
-        max_tokens=300,
-        temperature=0.8,
-        top_p=0.9,
-    )
-    elapsed = time.time() - start
 
-    eve_text = response.choices[0].message.content.strip()
-    log(f"EVE ({elapsed:.1f}s): \"{eve_text[:80]}\"", "OK")
-    return eve_text
+    # Primary: xAI Grok-3
+    if XAI_API_KEY:
+        try:
+            r = _req.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "grok-3", "messages": messages, "max_tokens": 300, "temperature": 0.85},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                text = r.json()["choices"][0]["message"]["content"].strip()
+                log(f"EVE xAI ({time.time()-start:.1f}s): \"{text[:80]}\"", "OK")
+                return text
+            log(f"xAI error {r.status_code}", "WARN")
+        except Exception as e:
+            log(f"xAI failed: {e}", "WARN")
+
+    # Fallback: Groq Llama
+    if GROQ_API_KEY:
+        try:
+            r = _req.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 300, "temperature": 0.85},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                text = r.json()["choices"][0]["message"]["content"].strip()
+                log(f"EVE Groq ({time.time()-start:.1f}s): \"{text[:80]}\"", "OK")
+                return text
+        except Exception as e:
+            log(f"Groq LLM failed: {e}", "WARN")
+
+    # Last resort: HF Inference API
+    from huggingface_hub import InferenceClient
+    client = InferenceClient(token=HF_TOKEN)
+    response = client.chat_completion(model=LLM_MODEL, messages=messages, max_tokens=300, temperature=0.85)
+    return response.choices[0].message.content.strip()
 
 
 def eve_think_stream(user_message, conversation_history):
-    """Stream EVE's response clause-by-clause for faster time-to-first-audio.
-    Yields text chunks at sentence/clause boundaries as the LLM generates tokens.
-    Each yielded chunk is a speakable clause (ends at . ? ! or newline)."""
-    import re
-    from huggingface_hub import InferenceClient
+    """Stream EVE's response clause-by-clause — xAI Grok-3 (SSE) → Groq → HF fallback."""
+    import re, requests as _req, json as _json
 
-    log(f"EVE thinking (stream): \"{user_message[:60]}\"...", "PIPE")
-    client = InferenceClient(token=HF_TOKEN)
-
-    messages = [{"role": "system", "content": EVE_SYSTEM_PROMPT}]
-    for turn in conversation_history[-10:]:
-        messages.append(turn)
-    messages.append({"role": "user", "content": user_message})
-
-    start = time.time()
-    buffer = ""
-    # Clause boundary pattern: sentence-ending punctuation followed by space or end
+    log(f"EVE stream: \"{user_message[:60]}\"...", "PIPE")
+    messages = _build_messages(user_message, conversation_history)
     clause_re = re.compile(r'[.!?]\s+|[.!?]$|\n')
+    start = time.time()
 
-    try:
-        stream = client.chat_completion(
-            model=LLM_MODEL,
-            messages=messages,
-            max_tokens=300,
-            temperature=0.8,
-            top_p=0.9,
-            stream=True,
-        )
-        for chunk in stream:
-            token = chunk.choices[0].delta.content
-            if token:
-                buffer += token
-                # Check if buffer contains a clause boundary
-                match = clause_re.search(buffer)
-                if match:
-                    # Yield everything up to and including the boundary
-                    end_pos = match.end()
-                    clause = buffer[:end_pos].strip()
-                    buffer = buffer[end_pos:]
-                    if clause:
-                        elapsed = time.time() - start
-                        log(f"EVE clause ({elapsed:.1f}s): \"{clause[:60]}\"", "OK")
-                        yield clause
-    except Exception as e:
-        log(f"Streaming failed, falling back to non-streaming: {e}", "WARN")
-        # Fallback: use non-streaming and yield the whole thing
-        full_text = eve_think(user_message, conversation_history)
-        yield full_text
-        return
+    def _stream_api(url, headers, payload):
+        """Generic SSE streaming: yields text tokens."""
+        with _req.post(url, headers=headers, json=payload, stream=True, timeout=30) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:100]}")
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8") if isinstance(line, bytes) else line
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        token = _json.loads(data)["choices"][0]["delta"].get("content", "")
+                        if token:
+                            yield token
+                    except Exception:
+                        pass
 
-    # Yield any remaining buffered text
-    if buffer.strip():
-        elapsed = time.time() - start
-        log(f"EVE final clause ({elapsed:.1f}s): \"{buffer.strip()[:60]}\"", "OK")
-        yield buffer.strip()
+    def _emit_clauses(token_gen):
+        """Buffer tokens, yield complete clauses."""
+        buffer = ""
+        for token in token_gen:
+            buffer += token
+            match = clause_re.search(buffer)
+            if match:
+                clause = buffer[:match.end()].strip()
+                buffer = buffer[match.end():]
+                if clause:
+                    log(f"EVE clause ({time.time()-start:.1f}s): \"{clause[:60]}\"", "OK")
+                    yield clause
+        if buffer.strip():
+            yield buffer.strip()
 
-    log(f"EVE stream complete ({time.time() - start:.1f}s total)", "OK")
+    # Try xAI Grok-3 streaming
+    if XAI_API_KEY:
+        try:
+            tokens = _stream_api(
+                "https://api.x.ai/v1/chat/completions",
+                {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"},
+                {"model": "grok-3", "messages": messages, "max_tokens": 300, "temperature": 0.85, "stream": True},
+            )
+            yield from _emit_clauses(tokens)
+            log(f"EVE xAI stream done ({time.time()-start:.1f}s)", "OK")
+            return
+        except Exception as e:
+            log(f"xAI stream failed: {e}", "WARN")
+
+    # Fallback: Groq Llama streaming
+    if GROQ_API_KEY:
+        try:
+            tokens = _stream_api(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 300, "temperature": 0.85, "stream": True},
+            )
+            yield from _emit_clauses(tokens)
+            log(f"EVE Groq stream done ({time.time()-start:.1f}s)", "OK")
+            return
+        except Exception as e:
+            log(f"Groq stream failed: {e}", "WARN")
+
+    # Last resort: non-streaming HF
+    log("Falling back to HF non-streaming", "WARN")
+    yield eve_think(user_message, conversation_history)
 
 
 # ─── EVE's Inner Eye: Image Generation ──────────────────────────────────────
@@ -1128,8 +1198,42 @@ def voice_chatterbox(text):
 
 
 # ─── Voice Router ────────────────────────────────────────────────────────────
+def voice_groq_orpheus(text, voice_id="tara"):
+    """Groq-hosted Orpheus TTS — fast, realistic female voice.
+    Requires terms acceptance at console.groq.com for canopylabs/orpheus-v1-english."""
+    import requests as _req, tempfile as _tmp
+    if not GROQ_API_KEY:
+        return None
+    start = time.time()
+    try:
+        r = _req.post(
+            "https://api.groq.com/openai/v1/audio/speech",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "canopylabs/orpheus-v1-english", "input": text, "voice": voice_id or "tara"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            tmp = _tmp.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.write(r.content)
+            tmp.flush()
+            log(f"Groq Orpheus TTS ({time.time()-start:.1f}s): {len(r.content)} bytes", "OK")
+            return tmp.name
+        log(f"Groq Orpheus TTS error {r.status_code}: {r.text[:100]}", "WARN")
+    except Exception as e:
+        log(f"Groq Orpheus TTS exception: {e}", "WARN")
+    return None
+
+
 def eve_speak(text, engine="kokoro", voice_id=None):
-    """Route to the selected voice engine with cascading fallback."""
+    """Route to the selected voice engine with cascading fallback.
+    Priority: Groq Orpheus (fast+realistic) → selected engine → Kokoro."""
+
+    # Always try Groq Orpheus first if key is set — it's the fastest realistic voice
+    if GROQ_API_KEY and engine != "kokoro":
+        result = voice_groq_orpheus(text, voice_id or "tara")
+        if result:
+            return result
+
     engines = {
         "kokoro": lambda: voice_kokoro(text, voice_id or "af_heart"),
         "qwen3": lambda: voice_qwen3(text, voice_id),
@@ -1138,16 +1242,16 @@ def eve_speak(text, engine="kokoro", voice_id=None):
         "chatterbox": lambda: voice_chatterbox(text),
     }
 
-    # Try selected engine first
+    # Try selected engine
     try:
-        result = engines[engine]()
+        result = engines.get(engine, engines["kokoro"])()
         if result:
             return result
     except Exception as e:
         log(f"{engine} failed: {e}", "WARN")
 
-    # Cascade through fallbacks — Orpheus first for max realism
-    fallback_order = ["orpheus", "qwen3", "kokoro", "chatterbox"]
+    # Cascade: Kokoro is always the reliable fallback (never fails)
+    fallback_order = ["kokoro", "orpheus", "qwen3", "chatterbox"]
     for fb in fallback_order:
         if fb == engine:
             continue
