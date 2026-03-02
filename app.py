@@ -1049,6 +1049,22 @@ def build_playground(default_engine="kokoro", animate_face=True):
         -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
     .eve-banner p { color: #666; font-size: 0.95em; margin: 4px 0 0 0; letter-spacing: 0.15em; }
     .chat-panel .chatbot { min-height: 500px !important; }
+
+    /* EVE idle animation — subtle breathing + micro-movements while waiting */
+    @keyframes eve-breathe {
+        0%, 100% { transform: scale(1.0) translateY(0px); }
+        50% { transform: scale(1.008) translateY(-2px); }
+    }
+    @keyframes eve-glow {
+        0%, 100% { filter: brightness(1.0) saturate(1.0); }
+        30% { filter: brightness(1.03) saturate(1.05); }
+        70% { filter: brightness(1.01) saturate(1.02); }
+    }
+    .eve-idle img {
+        animation: eve-breathe 4s ease-in-out infinite, eve-glow 6s ease-in-out infinite;
+        border-radius: 12px;
+    }
+    .eve-live-face { position: relative; }
     """
 
     _gradio_major = int(gr.__version__.split(".")[0])
@@ -1059,17 +1075,65 @@ def build_playground(default_engine="kokoro", animate_face=True):
         _blocks_kwargs["theme"] = _theme
         _blocks_kwargs["css"] = _css
 
+    # ─── Idle Animation: Pre-generate EVE's idle loop ────────────────
+    # Generate a short "idle smile" video on startup so EVE looks alive
+    _idle_video = [None]  # mutable container for thread safety
+
+    def _generate_idle_video():
+        """Generate a short idle animation (gentle smile) in background."""
+        import wave, tempfile, struct
+        try:
+            # Create a 2-second silence WAV for the animation driver
+            silence_path = os.path.join(tempfile.gettempdir(), "eve_silence.wav")
+            with wave.open(silence_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(24000)
+                # 2 seconds of near-silence (tiny noise so animation spaces don't reject it)
+                frames = [struct.pack("<h", (i % 3) - 1) for i in range(48000)]
+                wf.writeframes(b"".join(frames))
+
+            log("Generating idle smile animation...", "PIPE")
+            video = eve_animate(portrait_path, silence_path)
+            if video and os.path.isfile(str(video)):
+                _idle_video[0] = video
+                log(f"Idle animation ready: {video}", "OK")
+            else:
+                log("Idle animation failed — will use CSS breathing instead", "WARN")
+        except Exception as e:
+            log(f"Idle animation error: {e}", "WARN")
+
+    # Kick off idle video generation in a background thread
+    import threading
+    threading.Thread(target=_generate_idle_video, daemon=True).start()
+
     # ─── Live Mode: Real-Time Voice (WebRTC) ────────────────────────
     def _build_live_handler():
         """Create the ReplyOnPause handler for real-time voice conversation.
-        Uses AdditionalOutputs to update face display, transcript, and status."""
+        Uses AdditionalOutputs to update face display, transcript, and status.
+        Security: WebRTC is point-to-point encrypted. Input is validated and sanitized."""
         from fastrtc.utils import AdditionalOutputs
         live_history = []
         transcript_lines = []
+        _session_id = [None]  # track single session
 
         def _transcript_text():
             """Format the last few turns of transcript."""
             return "\n".join(transcript_lines[-10:]) if transcript_lines else ""
+
+        def _detect_mood(audio_data, sr):
+            """Simple mood detection from audio characteristics.
+            Returns a mood hint for EVE's brain to adapt to."""
+            import numpy as np
+            rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
+            duration = len(audio_data) / sr
+            if rms < 500:
+                return "quiet/calm"
+            elif rms > 8000:
+                return "energetic/excited"
+            elif duration > 8:
+                return "thoughtful/detailed"
+            return "conversational"
 
         def eve_live_reply(audio_tuple):
             """Real-time voice handler: STT → Brain → TTS → stream audio + update face.
@@ -1078,7 +1142,21 @@ def build_playground(default_engine="kokoro", animate_face=True):
             import tempfile, wave
 
             sr, audio_data = audio_tuple
+
+            # Validate audio input
+            if not isinstance(audio_data, np.ndarray) or len(audio_data) < 100:
+                log("Live: invalid audio input, skipping", "WARN")
+                return
+            # Cap max audio length to prevent abuse (60s max)
+            max_samples = sr * 60
+            if len(audio_data) > max_samples:
+                audio_data = audio_data[:max_samples]
+
             log(f"Live: received {len(audio_data)} samples at {sr}Hz", "PIPE")
+
+            # Detect mood from audio characteristics
+            mood = _detect_mood(audio_data, sr)
+            log(f"Live: detected mood: {mood}", "INFO")
 
             # Save incoming audio to temp WAV for STT
             tmp_in = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -1098,15 +1176,26 @@ def build_playground(default_engine="kokoro", animate_face=True):
             if not user_text or not user_text.strip():
                 log("Live: no speech detected", "WARN")
                 return
-            log(f"Live STT: '{user_text[:60]}'", "OK")
+
+            # Sanitize transcription — strip control chars, limit length
+            user_text = "".join(c for c in user_text if c.isprintable() or c in "\n ")
+            user_text = user_text[:2000]  # hard cap
+
+            log(f"Live STT: '{user_text[:60]}' (mood: {mood})", "OK")
             transcript_lines.append(f"You: {user_text}")
 
-            # Update status: thinking
-            yield AdditionalOutputs(portrait_path, None, _transcript_text(),
-                                    "Thinking...")
+            # Update status: listening attentively
+            yield AdditionalOutputs(portrait_path, _idle_video[0], _transcript_text(),
+                                    f"Listening... ({mood})")
 
-            # Brain — think
-            eve_response = eve_think(user_text, live_history)
+            # Brain — think (with mood context for adaptive response)
+            mood_context = live_history.copy()
+            if mood != "conversational":
+                mood_context.append({
+                    "role": "system",
+                    "content": f"[The user's tone sounds {mood}. Adjust your emotional warmth accordingly.]"
+                })
+            eve_response = eve_think(user_text, mood_context)
             live_history.append({"role": "user", "content": user_text})
             live_history.append({"role": "assistant", "content": eve_response})
             log(f"Live Brain: '{eve_response[:60]}'", "OK")
@@ -1131,14 +1220,13 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 out_data = out_data[:, 0]
 
             chunk_size = out_sr  # 1 second chunks
-            total_chunks = (len(out_data) + chunk_size - 1) // chunk_size
             for idx, i in enumerate(range(0, len(out_data), chunk_size)):
                 chunk = out_data[i:i + chunk_size]
                 if idx == 0:
-                    # First audio chunk — update status to speaking
+                    # First audio chunk — update status + show idle animation
                     yield ((out_sr, chunk.astype(np.int16)),
-                           AdditionalOutputs(portrait_path, None, _transcript_text(),
-                                             "Speaking..."))
+                           AdditionalOutputs(portrait_path, _idle_video[0],
+                                             _transcript_text(), "Speaking..."))
                 else:
                     yield (out_sr, chunk.astype(np.int16))
 
@@ -1152,6 +1240,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
             if video_path and os.path.isfile(str(video_path)):
                 log(f"Live: face animated -> {video_path}", "OK")
                 yield AdditionalOutputs(portrait_path, video_path, _transcript_text(),
+                                        "Ready")
+            elif _idle_video[0]:
+                # No new animation, but we have the idle loop — show it
+                log("Live: using idle animation", "INFO")
+                yield AdditionalOutputs(portrait_path, _idle_video[0], _transcript_text(),
                                         "Ready")
             else:
                 log("Live: face animation failed, keeping portrait", "WARN")
@@ -1189,25 +1282,26 @@ def build_playground(default_engine="kokoro", animate_face=True):
             )
 
             try:
-                from fastrtc import WebRTC, ReplyOnPause, get_hf_turn_credentials
+                from fastrtc import WebRTC, ReplyOnPause, get_cloudflare_turn_credentials
 
                 with gr.Row(equal_height=True):
-                    # LEFT: EVE's face (portrait + animated video)
-                    with gr.Column(scale=2):
+                    # LEFT: EVE's face — idle breathing animation via CSS
+                    with gr.Column(scale=2, elem_classes="eve-live-face"):
                         live_portrait = gr.Image(
                             value=portrait_path, label="EVE",
                             show_label=False, height=400,
                             show_download_button=False,
+                            elem_classes="eve-idle",
                         )
                         live_video = gr.Video(
                             label="Animated", visible=False,
-                            height=400, autoplay=True,
+                            height=400, autoplay=True, loop=True,
                             show_download_button=False,
                         )
 
                     # RIGHT: Mic + transcript
                     with gr.Column(scale=2):
-                        rtc_config = get_hf_turn_credentials() if HF_TOKEN else None
+                        rtc_config = get_cloudflare_turn_credentials(hf_token=HF_TOKEN) if HF_TOKEN else None
                         live_handler = ReplyOnPause(
                             _build_live_handler(),
                             output_sample_rate=24000,
@@ -1238,17 +1332,39 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     fn=live_handler,
                     inputs=[live_webrtc],
                     outputs=[live_webrtc],
-                    time_limit=120,
-                    concurrency_limit=2,
+                    time_limit=None,  # mic stays on until user turns it off
+                    concurrency_limit=1,  # single session only — no shared state
                 )
                 live_webrtc.on_additional_outputs(
                     fn=lambda img, vid, txt, st: (
                         gr.update(value=img, visible=(vid is None)),
-                        gr.update(value=vid, visible=(vid is not None)) if vid else gr.update(visible=False),
+                        gr.update(value=vid, visible=(vid is not None), loop=True) if vid else gr.update(visible=False),
                         txt,
                         st,
                     ),
                     outputs=[live_portrait, live_video, live_transcript, live_status],
+                )
+
+                # On app load, swap in idle animation when ready
+                _idle_shown = [False]
+
+                def _check_idle():
+                    """Swap in idle animation video once it's ready."""
+                    if _idle_shown[0]:
+                        return (gr.update(), gr.update(), gr.update())
+                    if _idle_video[0] and os.path.isfile(str(_idle_video[0])):
+                        _idle_shown[0] = True
+                        return (
+                            gr.update(visible=False),
+                            gr.update(value=_idle_video[0], visible=True),
+                            "EVE is here — speak to her",
+                        )
+                    return (gr.update(), gr.update(), "Waking up...")
+
+                app.load(
+                    fn=_check_idle,
+                    outputs=[live_portrait, live_video, live_status],
+                    every=10,
                 )
 
             except Exception as _rtc_err:
