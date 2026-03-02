@@ -296,6 +296,66 @@ def eve_think(user_message, conversation_history):
     return eve_text
 
 
+def eve_think_stream(user_message, conversation_history):
+    """Stream EVE's response clause-by-clause for faster time-to-first-audio.
+    Yields text chunks at sentence/clause boundaries as the LLM generates tokens.
+    Each yielded chunk is a speakable clause (ends at . ? ! or newline)."""
+    import re
+    from huggingface_hub import InferenceClient
+
+    log(f"EVE thinking (stream): \"{user_message[:60]}\"...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
+
+    messages = [{"role": "system", "content": EVE_SYSTEM_PROMPT}]
+    for turn in conversation_history[-10:]:
+        messages.append(turn)
+    messages.append({"role": "user", "content": user_message})
+
+    start = time.time()
+    buffer = ""
+    # Clause boundary pattern: sentence-ending punctuation followed by space or end
+    clause_re = re.compile(r'[.!?]\s+|[.!?]$|\n')
+
+    try:
+        stream = client.chat_completion(
+            model=LLM_MODEL,
+            messages=messages,
+            max_tokens=300,
+            temperature=0.8,
+            top_p=0.9,
+            stream=True,
+        )
+        for chunk in stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                buffer += token
+                # Check if buffer contains a clause boundary
+                match = clause_re.search(buffer)
+                if match:
+                    # Yield everything up to and including the boundary
+                    end_pos = match.end()
+                    clause = buffer[:end_pos].strip()
+                    buffer = buffer[end_pos:]
+                    if clause:
+                        elapsed = time.time() - start
+                        log(f"EVE clause ({elapsed:.1f}s): \"{clause[:60]}\"", "OK")
+                        yield clause
+    except Exception as e:
+        log(f"Streaming failed, falling back to non-streaming: {e}", "WARN")
+        # Fallback: use non-streaming and yield the whole thing
+        full_text = eve_think(user_message, conversation_history)
+        yield full_text
+        return
+
+    # Yield any remaining buffered text
+    if buffer.strip():
+        elapsed = time.time() - start
+        log(f"EVE final clause ({elapsed:.1f}s): \"{buffer.strip()[:60]}\"", "OK")
+        yield buffer.strip()
+
+    log(f"EVE stream complete ({time.time() - start:.1f}s total)", "OK")
+
+
 # ─── Voice Engine: Kokoro (Fast — <0.3s) ────────────────────────────────────
 def voice_kokoro(text, voice_id="af_heart", speed=0.9):
     """Generate voice via Kokoro TTS. Sub-0.3s, 82M params, Apache 2.0.
@@ -902,8 +962,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
     # ─── Core Pipeline (Progressive Streaming) ───
     def process_message(user_text, chat_history, voice_engine, voice_choice,
                         speed, do_animate):
-        """Full pipeline: Text → Brain → Voice → (yield audio) → Face → (yield video).
-        Generator: yields progressive updates so user hears audio immediately."""
+        """Full pipeline: Text → Streaming Brain → First-Clause TTS → (yield audio fast) → Face.
+        Generator: yields progressive updates. Clause-segmented streaming for ~1.5s first audio."""
         if not user_text or not user_text.strip():
             yield (chat_history, None, gr.update(), gr.update(), "", "")
             return
@@ -911,18 +971,30 @@ def build_playground(default_engine="kokoro", animate_face=True):
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
-        # BRAIN — EVE thinks (~2-3s)
-        eve_response = eve_think(user_text, conversation_history)
+        # BRAIN + VOICE — Stream clauses, TTS the first one immediately
+        engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
+        clauses = []
+        first_audio = None
+
+        for clause in eve_think_stream(user_text, conversation_history):
+            clauses.append(clause)
+            if first_audio is None:
+                # TTS the first clause immediately — user hears audio in ~1.5s
+                first_audio = eve_speak(clause, engine=engine_key, voice_id=voice_id)
+
+        eve_response = " ".join(clauses)
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
         chat_history.append({"role": "assistant", "content": eve_response})
 
-        # VOICE — EVE speaks (~1-3s)
-        engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
-        audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+        # If we have more than one clause, TTS the full response for better prosody
+        if len(clauses) > 1 and first_audio:
+            full_audio = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+            audio_path = full_audio if full_audio else first_audio
+        else:
+            audio_path = first_audio
 
         # ── YIELD 1: Chat + Audio play immediately ──
-        # User hears EVE within ~5s while animation runs in background
         if do_animate and audio_path:
             yield (chat_history, audio_path,
                    gr.update(),              # eve_video unchanged
@@ -959,8 +1031,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
                       speed, do_animate):
-        """Pipeline with mic input: STT → Brain → Voice → (yield audio) → Face → (yield video).
-        Generator: yields progressive updates so user hears audio immediately."""
+        """Pipeline with mic: STT → Streaming Brain → First-Clause TTS → Face.
+        Generator: clause-segmented streaming for ~1.5s first audio."""
         if audio is None:
             yield (chat_history, None, gr.update(), gr.update(), "")
             return
@@ -973,13 +1045,27 @@ def build_playground(default_engine="kokoro", animate_face=True):
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
-        eve_response = eve_think(user_text, conversation_history)
+        # BRAIN + VOICE — Stream clauses, TTS first one immediately
+        engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
+        clauses = []
+        first_audio = None
+
+        for clause in eve_think_stream(user_text, conversation_history):
+            clauses.append(clause)
+            if first_audio is None:
+                first_audio = eve_speak(clause, engine=engine_key, voice_id=voice_id)
+
+        eve_response = " ".join(clauses)
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
         chat_history.append({"role": "assistant", "content": eve_response})
 
-        engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
-        audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+        # TTS full response for better prosody if multiple clauses
+        if len(clauses) > 1 and first_audio:
+            full_audio = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+            audio_path = full_audio if full_audio else first_audio
+        else:
+            audio_path = first_audio
 
         # ── YIELD 1: Chat + Audio play immediately ──
         if do_animate and audio_path:
@@ -1071,6 +1157,18 @@ def build_playground(default_engine="kokoro", animate_face=True):
         transform: scale(1.08) !important;
         box-shadow: 0 6px 28px rgba(196, 77, 255, 0.6) !important;
     }
+    /* Pulse animation when mic is active/recording */
+    @keyframes eve-mic-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 107, 157, 0.5); }
+        50% { box-shadow: 0 0 0 14px rgba(255, 107, 157, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 107, 157, 0); }
+    }
+    .eve-mic-btn button[aria-label*="Stop"],
+    .eve-mic-btn button.recording,
+    .eve-mic-btn button[data-state="recording"] {
+        animation: eve-mic-pulse 1.8s ease-out infinite !important;
+        background: linear-gradient(135deg, #ff3d7f, #a020f0) !important;
+    }
     .eve-mic-live {
         color: #ff6b9d; font-size: 0.85em; text-align: center;
         margin-top: 8px; letter-spacing: 0.1em;
@@ -1131,7 +1229,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
         log("Generating greeting audio + video...", "PIPE")
         try:
-            greeting_text = "Hello TJ! What would you like to talk about? What's on your mind?"
+            greeting_text = "Hey TJ! Give me just a moment to get everything ready so we can talk in real time. I'll be right with you, trust me, I'm worth the wait."
             audio_path = eve_speak(greeting_text, engine="qwen3")
             if not audio_path or not os.path.isfile(str(audio_path)):
                 audio_path = eve_speak(greeting_text, engine="kokoro", voice_id="af_heart")
@@ -1151,6 +1249,64 @@ def build_playground(default_engine="kokoro", animate_face=True):
             log(f"Greeting generation error: {e}", "WARN")
 
     threading.Thread(target=_generate_greeting, daemon=True).start()
+
+    # ─── Expression Clip Library: Varied idle animations ─────────────
+    _expression_clips = []  # list of video paths for random idle selection
+
+    def _generate_expression_clips():
+        """Generate multiple idle animation clips with different audio patterns.
+        Each pattern drives slightly different facial movement for variety."""
+        import wave, struct, random as _rnd
+
+        # Wait for idle video to finish first (it's the baseline)
+        import time as _time
+        for _ in range(180):
+            if _idle_video[0]:
+                break
+            _time.sleep(1)
+
+        # The first idle video is already generated — add it to the library
+        if _idle_video[0] and os.path.isfile(str(_idle_video[0])):
+            _expression_clips.append(_idle_video[0])
+
+        # Generate 3 more clips with different audio patterns
+        patterns = [
+            ("nod", lambda i: struct.pack("<h", int(80 * ((i // 4000) % 2)))),     # rhythmic pulse
+            ("blink", lambda i: struct.pack("<h", int(40 * ((i // 8000) % 3)))),    # slow blink rhythm
+            ("think", lambda i: struct.pack("<h", int(60 * _rnd.choice([-1, 0, 1])))),  # gentle random
+        ]
+
+        for name, pattern_fn in patterns:
+            try:
+                silence_path = os.path.join(tempfile.gettempdir(), f"eve_{name}.wav")
+                with wave.open(silence_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    # 8 seconds of patterned near-silence
+                    frames = [pattern_fn(i) for i in range(192000)]
+                    wf.writeframes(b"".join(frames))
+
+                log(f"Generating expression clip: {name}...", "PIPE")
+                video = eve_animate(portrait_path, silence_path)
+                if video and os.path.isfile(str(video)):
+                    _expression_clips.append(video)
+                    log(f"Expression clip '{name}' ready ({len(_expression_clips)} total)", "OK")
+                else:
+                    log(f"Expression clip '{name}' failed — skipping", "WARN")
+            except Exception as e:
+                log(f"Expression clip '{name}' error: {e}", "WARN")
+
+        log(f"Expression library complete: {len(_expression_clips)} clips", "OK")
+
+    threading.Thread(target=_generate_expression_clips, daemon=True).start()
+
+    def _random_idle_clip():
+        """Return a random idle clip from the expression library, or the base idle."""
+        import random as _rnd
+        if _expression_clips:
+            return _rnd.choice(_expression_clips)
+        return _idle_video[0]
 
     # ─── Live Mode: Real-Time Voice (WebRTC) ────────────────────────
     def _build_live_handler():
@@ -1230,17 +1386,54 @@ def build_playground(default_engine="kokoro", animate_face=True):
             transcript_lines.append(f"You: {user_text}")
 
             # Update status: listening attentively
-            yield AdditionalOutputs(portrait_path, _idle_video[0], _transcript_text(),
+            yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
                                     f"Listening... ({mood})")
 
-            # Brain — think (with mood context for adaptive response)
+            # Brain — stream clause-by-clause for faster first audio
             mood_context = live_history.copy()
             if mood != "conversational":
                 mood_context.append({
                     "role": "system",
                     "content": f"[The user's tone sounds {mood}. Adjust your emotional warmth accordingly.]"
                 })
-            eve_response = eve_think(user_text, mood_context)
+
+            yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
+                                    "EVE is thinking...")
+
+            # Stream LLM and TTS sentence-by-sentence
+            import soundfile as sf
+            all_clauses = []
+            all_audio_paths = []
+            first_chunk_sent = False
+
+            for clause in eve_think_stream(user_text, mood_context):
+                all_clauses.append(clause)
+                log(f"Live clause: '{clause[:60]}'", "OK")
+
+                # TTS this clause immediately
+                clause_audio = eve_speak(clause, engine="qwen3")
+                if not clause_audio or not os.path.isfile(str(clause_audio)):
+                    continue
+                all_audio_paths.append(clause_audio)
+
+                # Stream this clause's audio chunks
+                out_data, out_sr = sf.read(clause_audio, dtype="int16")
+                if len(out_data.shape) > 1:
+                    out_data = out_data[:, 0]
+
+                chunk_size = out_sr  # 1 second chunks
+                for idx, i in enumerate(range(0, len(out_data), chunk_size)):
+                    chunk = out_data[i:i + chunk_size]
+                    if not first_chunk_sent:
+                        # First audio chunk ever — update status
+                        first_chunk_sent = True
+                        yield ((out_sr, chunk.astype(np.int16)),
+                               AdditionalOutputs(portrait_path, _random_idle_clip(),
+                                                 _transcript_text(), "Speaking..."))
+                    else:
+                        yield (out_sr, chunk.astype(np.int16))
+
+            eve_response = " ".join(all_clauses)
             live_history.append({"role": "user", "content": user_text})
             live_history.append({"role": "assistant", "content": eve_response})
             log(f"Live Brain: '{eve_response[:60]}'", "OK")
@@ -1249,51 +1442,35 @@ def build_playground(default_engine="kokoro", animate_face=True):
             if len(live_history) > 20:
                 live_history[:] = live_history[-16:]
 
-            # TTS — speak (Qwen3 for quality, falls back to Kokoro if needed)
-            audio_path = eve_speak(eve_response, engine="qwen3")
-            if not audio_path or not os.path.isfile(str(audio_path)):
-                log("Live: TTS failed", "ERR")
+            if not first_chunk_sent:
+                log("Live: all TTS failed", "ERR")
                 yield AdditionalOutputs(portrait_path, None, _transcript_text(),
                                         "Voice failed — try again")
                 return
-            log(f"Live TTS: {audio_path}", "OK")
 
-            # Stream audio chunks with status updates
-            import soundfile as sf
-            out_data, out_sr = sf.read(audio_path, dtype="int16")
-            if len(out_data.shape) > 1:
-                out_data = out_data[:, 0]
-
-            chunk_size = out_sr  # 1 second chunks
-            for idx, i in enumerate(range(0, len(out_data), chunk_size)):
-                chunk = out_data[i:i + chunk_size]
-                if idx == 0:
-                    # First audio chunk — update status + show idle animation
-                    yield ((out_sr, chunk.astype(np.int16)),
-                           AdditionalOutputs(portrait_path, _idle_video[0],
-                                             _transcript_text(), "Speaking..."))
-                else:
-                    yield (out_sr, chunk.astype(np.int16))
-
-            # After audio finishes, generate face animation
+            # After all audio finishes, generate face animation using last audio
             # (user already heard the response — this is a visual bonus)
-            log("Live: starting face animation...", "PIPE")
-            yield AdditionalOutputs(portrait_path, None, _transcript_text(),
-                                    "Animating face...")
-
-            video_path = eve_animate(portrait_path, audio_path)
-            if video_path and os.path.isfile(str(video_path)):
-                log(f"Live: face animated -> {video_path}", "OK")
-                yield AdditionalOutputs(portrait_path, video_path, _transcript_text(),
-                                        "Ready")
-            elif _idle_video[0]:
-                # No new animation, but we have the idle loop — show it
-                log("Live: using idle animation", "INFO")
-                yield AdditionalOutputs(portrait_path, _idle_video[0], _transcript_text(),
-                                        "Ready")
-            else:
-                log("Live: face animation failed, keeping portrait", "WARN")
+            last_audio = all_audio_paths[-1] if all_audio_paths else None
+            if last_audio:
+                log("Live: starting face animation...", "PIPE")
                 yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                        "Animating face...")
+
+                video_path = eve_animate(portrait_path, last_audio)
+                if video_path and os.path.isfile(str(video_path)):
+                    log(f"Live: face animated -> {video_path}", "OK")
+                    yield AdditionalOutputs(portrait_path, video_path, _transcript_text(),
+                                            "Ready")
+                elif _expression_clips:
+                    log("Live: using random idle clip", "INFO")
+                    yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
+                                            "Ready")
+                else:
+                    log("Live: face animation failed, keeping portrait", "WARN")
+                    yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                            "Ready")
+            else:
+                yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
                                         "Ready")
 
             # Clean up
@@ -1368,7 +1545,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         )
 
                 live_status = gr.Textbox(
-                    value="Ready — click the microphone and start talking",
+                    value="Tap the mic to start a live call with EVE",
                     label="Status", interactive=False, max_lines=1,
                 )
 
