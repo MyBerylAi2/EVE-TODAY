@@ -935,7 +935,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
         elif not audio_path:
             log("Face animation skipped — no audio", "WARN")
 
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if video_path else 'Off'}"
+        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'Animated' if video_path else ('Pending' if do_animate else 'Off')}"
 
         # Toggle portrait/video visibility
         if video_path:
