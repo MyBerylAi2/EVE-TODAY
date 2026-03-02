@@ -1061,11 +1061,18 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
     # ─── Live Mode: Real-Time Voice (WebRTC) ────────────────────────
     def _build_live_handler():
-        """Create the ReplyOnPause handler for real-time voice conversation."""
+        """Create the ReplyOnPause handler for real-time voice conversation.
+        Uses AdditionalOutputs to update face display, transcript, and status."""
+        from fastrtc.utils import AdditionalOutputs
         live_history = []
+        transcript_lines = []
+
+        def _transcript_text():
+            """Format the last few turns of transcript."""
+            return "\n".join(transcript_lines[-10:]) if transcript_lines else ""
 
         def eve_live_reply(audio_tuple):
-            """Real-time voice handler: STT → Brain → TTS → stream audio back.
+            """Real-time voice handler: STT → Brain → TTS → stream audio + update face.
             Receives (sample_rate, numpy_array), yields (sample_rate, numpy_array)."""
             import numpy as np
             import tempfile, wave
@@ -1079,7 +1086,6 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 wf.setnchannels(1)
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(sr)
-                # Ensure int16
                 if audio_data.dtype != np.int16:
                     if audio_data.dtype in (np.float32, np.float64):
                         audio_data = (audio_data * 32767).astype(np.int16)
@@ -1093,35 +1099,64 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 log("Live: no speech detected", "WARN")
                 return
             log(f"Live STT: '{user_text[:60]}'", "OK")
+            transcript_lines.append(f"You: {user_text}")
+
+            # Update status: thinking
+            yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                    "Thinking...")
 
             # Brain — think
             eve_response = eve_think(user_text, live_history)
             live_history.append({"role": "user", "content": user_text})
             live_history.append({"role": "assistant", "content": eve_response})
             log(f"Live Brain: '{eve_response[:60]}'", "OK")
+            transcript_lines.append(f"EVE: {eve_response}")
 
-            # Keep history manageable
             if len(live_history) > 20:
                 live_history[:] = live_history[-16:]
 
-            # TTS — speak (get wav file)
+            # TTS — speak
             audio_path = eve_speak(eve_response, engine="kokoro", voice_id="af_heart")
             if not audio_path or not os.path.isfile(str(audio_path)):
                 log("Live: TTS failed", "ERR")
+                yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                        "Voice failed — try again")
                 return
             log(f"Live TTS: {audio_path}", "OK")
 
-            # Read the wav and yield as (sample_rate, numpy_array) chunks
+            # Stream audio chunks with status updates
             import soundfile as sf
             out_data, out_sr = sf.read(audio_path, dtype="int16")
             if len(out_data.shape) > 1:
-                out_data = out_data[:, 0]  # mono
+                out_data = out_data[:, 0]
 
-            # Yield in chunks for streaming
             chunk_size = out_sr  # 1 second chunks
-            for i in range(0, len(out_data), chunk_size):
+            total_chunks = (len(out_data) + chunk_size - 1) // chunk_size
+            for idx, i in enumerate(range(0, len(out_data), chunk_size)):
                 chunk = out_data[i:i + chunk_size]
-                yield (out_sr, chunk.astype(np.int16))
+                if idx == 0:
+                    # First audio chunk — update status to speaking
+                    yield ((out_sr, chunk.astype(np.int16)),
+                           AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                             "Speaking..."))
+                else:
+                    yield (out_sr, chunk.astype(np.int16))
+
+            # After audio finishes, generate face animation
+            # (user already heard the response — this is a visual bonus)
+            log("Live: starting face animation...", "PIPE")
+            yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                    "Animating face...")
+
+            video_path = eve_animate(portrait_path, audio_path)
+            if video_path and os.path.isfile(str(video_path)):
+                log(f"Live: face animated -> {video_path}", "OK")
+                yield AdditionalOutputs(portrait_path, video_path, _transcript_text(),
+                                        "Ready")
+            else:
+                log("Live: face animation failed, keeping portrait", "WARN")
+                yield AdditionalOutputs(portrait_path, None, _transcript_text(),
+                                        "Ready")
 
             # Clean up
             try:
@@ -1148,27 +1183,57 @@ def build_playground(default_engine="kokoro", animate_face=True):
          # ═══════════════════════════════════════════════════════════
          with gr.Tab("Live Mode", id="live"):
             gr.Markdown(
-                "### Real-Time Voice Conversation\n"
-                "Click the microphone below and speak to EVE. "
-                "She'll respond in real-time via WebRTC streaming."
+                "### Real-Time Voice & Face Conversation\n"
+                "Click the microphone and speak to EVE. She responds in real-time, "
+                "then her face animates with full expression."
             )
 
             try:
                 from fastrtc import WebRTC, ReplyOnPause, get_hf_turn_credentials
 
-                rtc_config = get_hf_turn_credentials() if HF_TOKEN else None
-                live_handler = ReplyOnPause(
-                    _build_live_handler(),
-                    output_sample_rate=24000,
-                    can_interrupt=True,
+                with gr.Row(equal_height=True):
+                    # LEFT: EVE's face (portrait + animated video)
+                    with gr.Column(scale=2):
+                        live_portrait = gr.Image(
+                            value=portrait_path, label="EVE",
+                            show_label=False, height=400,
+                            show_download_button=False,
+                        )
+                        live_video = gr.Video(
+                            label="Animated", visible=False,
+                            height=400, autoplay=True,
+                            show_download_button=False,
+                        )
+
+                    # RIGHT: Mic + transcript
+                    with gr.Column(scale=2):
+                        rtc_config = get_hf_turn_credentials() if HF_TOKEN else None
+                        live_handler = ReplyOnPause(
+                            _build_live_handler(),
+                            output_sample_rate=24000,
+                            can_interrupt=True,
+                        )
+
+                        live_webrtc = WebRTC(
+                            label="Microphone",
+                            modality="audio",
+                            mode="send-receive",
+                            rtc_configuration=rtc_config,
+                        )
+
+                        live_transcript = gr.Textbox(
+                            value="", label="Transcript",
+                            interactive=False, lines=8, max_lines=12,
+                        )
+
+                live_status = gr.Textbox(
+                    value="Ready — click the microphone and start talking",
+                    label="Status", interactive=False, max_lines=1,
                 )
 
-                live_webrtc = WebRTC(
-                    label="EVE Live",
-                    modality="audio",
-                    mode="send-receive",
-                    rtc_configuration=rtc_config,
-                )
+                # Wire WebRTC with AdditionalOutputs:
+                # Handler yields audio to live_webrtc, plus
+                # AdditionalOutputs(portrait, video, transcript, status)
                 live_webrtc.stream(
                     fn=live_handler,
                     inputs=[live_webrtc],
@@ -1176,10 +1241,14 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     time_limit=120,
                     concurrency_limit=2,
                 )
-
-                live_status = gr.Textbox(
-                    value="Ready — click the microphone and start talking",
-                    label="Status", interactive=False, max_lines=1,
+                live_webrtc.on_additional_outputs(
+                    fn=lambda img, vid, txt, st: (
+                        gr.update(value=img, visible=(vid is None)),
+                        gr.update(value=vid, visible=(vid is not None)) if vid else gr.update(visible=False),
+                        txt,
+                        st,
+                    ),
+                    outputs=[live_portrait, live_video, live_transcript, live_status],
                 )
 
             except Exception as _rtc_err:
