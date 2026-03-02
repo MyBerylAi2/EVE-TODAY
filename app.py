@@ -1955,9 +1955,23 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 wf.writeframes(audio_data.tobytes())
 
             # STT — transcribe
-            user_text = transcribe_audio(tmp_in.name)
+            try:
+                user_text = transcribe_audio(tmp_in.name)
+            except Exception as e:
+                log(f"Live: STT error: {e}", "ERR")
+                user_text = None
+
             if not user_text or not user_text.strip():
-                log("Live: no speech detected", "WARN")
+                log("Live: no speech detected — giving audio feedback", "WARN")
+                # Give audible feedback so TJ knows EVE heard something
+                nudge = eve_speak("Hmm, I didn't catch that — try again?", engine="kokoro", voice_id="af_heart")
+                if nudge and os.path.isfile(str(nudge)):
+                    import soundfile as sf
+                    out_data, out_sr = sf.read(nudge, dtype="int16")
+                    if len(out_data.shape) > 1:
+                        out_data = out_data[:, 0]
+                    yield ((out_sr, out_data.astype(np.int16)),
+                           AdditionalOutputs(portrait_path, None, _transcript_text(), "Didn't catch that — try again"))
                 return
 
             # Sanitize transcription — strip control chars, limit length
@@ -1988,7 +2002,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 "content": f"[You can sense the person's energy: {mood}. Let this color your response naturally — don't mention it explicitly unless it feels right. React like Samantha would.]"
             })
 
-            yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
+            yield AdditionalOutputs(portrait_path, None, _transcript_text(),
                                     "EVE is thinking...")
 
             # Stream LLM and TTS sentence-by-sentence
@@ -1997,7 +2011,19 @@ def build_playground(default_engine="kokoro", animate_face=True):
             all_audio_paths = []
             first_chunk_sent = False
 
-            for clause in eve_think_stream(user_text, mood_context):
+            try:
+              stream_iter = eve_think_stream(user_text, mood_context)
+            except Exception as e:
+                log(f"Live: LLM stream failed: {e}", "ERR")
+                err_audio = eve_speak("Give me one second, I'm having a little hiccup.", engine="kokoro", voice_id="af_heart")
+                if err_audio and os.path.isfile(str(err_audio)):
+                    out_data, out_sr = sf.read(err_audio, dtype="int16")
+                    if len(out_data.shape) > 1: out_data = out_data[:, 0]
+                    yield ((out_sr, out_data.astype(np.int16)),
+                           AdditionalOutputs(portrait_path, None, _transcript_text(), "Try again"))
+                return
+
+            for clause in stream_iter:
                 all_clauses.append(clause)
                 log(f"Live clause: '{clause[:60]}'", "OK")
 
@@ -2007,8 +2033,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     continue  # pure image tag, skip TTS
 
                 # TTS this clause immediately
-                # Orpheus for max realism + emotion tags (<chuckle>, <sigh>, etc.)
-                clause_audio = eve_speak(speak_clause, engine="orpheus", voice_id="tara")
+                # Kokoro first (fastest, <0.3s) — Orpheus fallback for emotion tags
+                clause_audio = eve_speak(speak_clause, engine="kokoro", voice_id="af_heart")
                 if not clause_audio or not os.path.isfile(str(clause_audio)):
                     continue
                 all_audio_paths.append(clause_audio)
