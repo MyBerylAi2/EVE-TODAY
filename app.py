@@ -1198,25 +1198,32 @@ def voice_chatterbox(text):
 
 
 # ─── Voice Router ────────────────────────────────────────────────────────────
-def voice_groq_orpheus(text, voice_id="tara"):
+def voice_groq_orpheus(text, voice_id="hannah"):
     """Groq-hosted Orpheus TTS — fast, realistic female voice.
-    Requires terms acceptance at console.groq.com for canopylabs/orpheus-v1-english."""
+    Voices: hannah (warm), autumn (bright), diana (smooth)."""
     import requests as _req, tempfile as _tmp
     if not GROQ_API_KEY:
         return None
+    # Map old voice names to Groq Orpheus voices
+    _voice_map = {"tara": "hannah", "leah": "autumn", "jess": "autumn",
+                  "mia": "diana", "zoe": "autumn"}
+    voice = _voice_map.get(voice_id, voice_id) if voice_id else "hannah"
+    if voice not in ("hannah", "autumn", "diana", "austin", "daniel", "troy"):
+        voice = "hannah"
     start = time.time()
     try:
         r = _req.post(
             "https://api.groq.com/openai/v1/audio/speech",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "canopylabs/orpheus-v1-english", "input": text, "voice": voice_id or "tara"},
+            json={"model": "canopylabs/orpheus-v1-english", "input": text,
+                  "voice": voice, "response_format": "wav"},
             timeout=15,
         )
         if r.status_code == 200:
-            tmp = _tmp.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp = _tmp.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.write(r.content)
             tmp.flush()
-            log(f"Groq Orpheus TTS ({time.time()-start:.1f}s): {len(r.content)} bytes", "OK")
+            log(f"Groq Orpheus TTS ({time.time()-start:.1f}s): {voice}, {len(r.content)} bytes", "OK")
             return tmp.name
         log(f"Groq Orpheus TTS error {r.status_code}: {r.text[:100]}", "WARN")
     except Exception as e:
@@ -2053,9 +2060,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 if not speak_clause:
                     continue  # pure image tag, skip TTS
 
-                # TTS this clause immediately
-                # Kokoro first (fastest, <0.3s) — Orpheus fallback for emotion tags
-                clause_audio = eve_speak(speak_clause, engine="kokoro", voice_id="af_heart")
+                # TTS this clause — Groq Orpheus (realistic) → Kokoro fallback
+                clause_audio = eve_speak(speak_clause, engine="orpheus", voice_id="hannah")
                 if not clause_audio or not os.path.isfile(str(clause_audio)):
                     continue
                 all_audio_paths.append(clause_audio)
