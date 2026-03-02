@@ -203,17 +203,26 @@ def ensure_portrait():
 
 
 # ─── Gradio Client Helper ───────────────────────────────────────────────────
+
+def _make_client(src, token=None):
+    """Create a gradio_client.Client with compatibility for both old (token=) and new (hf_token=) API."""
+    from gradio_client import Client
+    tok = token or HF_TOKEN
+    try:
+        return Client(src, hf_token=tok)
+    except TypeError:
+        return Client(src, token=tok)
+
+
 def get_space_client(space_key):
     """Connect to a HF Space with fallback to direct URL."""
-    from gradio_client import Client
-
     space = SPACES[space_key]
     try:
-        return Client(space["name"], token=HF_TOKEN)
+        return _make_client(space["name"])
     except Exception:
         if "url" in space:
             log(f"{space_key} name lookup failed, trying direct URL...", "WARN")
-            return Client(space["url"], token=HF_TOKEN)
+            return _make_client(space["url"])
         raise
 
 
@@ -344,7 +353,7 @@ def voice_kokoro(text, voice_id="af_heart", speed=0.9):
     # Method 3: Community Space (Remsky/Kokoro-TTS-Zero has API enabled)
     try:
         from gradio_client import Client
-        client = Client("Remsky/Kokoro-TTS-Zero", token=HF_TOKEN)
+        client = _make_client("Remsky/Kokoro-TTS-Zero")
         start = time.time()
 
         result = client.predict(text, voice_id, speed, api_name="/generate")
@@ -633,7 +642,7 @@ def eve_animate(portrait_path, audio_path):
                     continue
                 try:
                     log(f"  Connecting to {addr}...", "INFO")
-                    client = Client(addr, token=HF_TOKEN)
+                    client = _make_client(addr)
                     log(f"  Connected to {addr}", "OK")
                     break
                 except Exception as ce:
@@ -751,7 +760,7 @@ def agent_realism(portrait_path, depth_map_path):
     for space_id in REALISM_SPACES:
         try:
             log(f"Realism Agent trying {space_id}...", "PIPE")
-            client = Client(space_id, token=HF_TOKEN)
+            client = _make_client(space_id)
             start = time.time()
 
             if "eden-diffusion-studio" in space_id:
@@ -1296,7 +1305,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     from gradio_client import Client, handle_file
                     report.append(f"  Connecting...")
                     addr = space_cfg.get("url") or name
-                    client = Client(addr, token=HF_TOKEN)
+                    client = _make_client(addr)
                     report.append(f"  Connected to {addr}")
 
                     params_fn = space_cfg.get("params")
