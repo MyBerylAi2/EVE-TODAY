@@ -54,9 +54,29 @@ SPACES = {
     "eden-studio": {"name": "AIBRUH/eden-diffusion-studio"},
 }
 
-# EVE portrait
-EVE_PORTRAIT_URL = "https://huggingface.co/spaces/AIBRUH/eden-diffusion-studio/resolve/main/assets/eve-portrait.png"
-EVE_PORTRAIT_LOCAL = SCRIPT_DIR / "eve-portrait.png"
+# EVE portrait — fallback chain (never placeholders)
+EVE_PORTRAIT_URLS = [
+    "https://huggingface.co/spaces/AIBRUH/eve-voice-engine/resolve/main/eve-portrait.jpeg",
+    "https://huggingface.co/spaces/vinthony/SadTalker/resolve/main/examples/source_image/full4.jpeg",
+    "https://huggingface.co/spaces/vinthony/SadTalker/resolve/main/examples/source_image/happy.png",
+    "https://huggingface.co/spaces/KlingTeam/LivePortrait/resolve/main/assets/examples/source/s9.jpg",
+]
+EVE_PORTRAIT_LOCAL = SCRIPT_DIR / "eve-portrait.jpeg"
+
+# Pipeline backup URLs — every node has fallbacks so we never show placeholders
+DEPTH_MODELS = [
+    "depth-anything/Depth-Anything-V2-Large-hf",
+    "depth-anything/Depth-Anything-V2-Base-hf",
+    "LiheYoung/depth-anything-large-hf",
+]
+REALISM_SPACES = [
+    "AIBRUH/eden-diffusion-studio",
+    "KingNish/Realtime-FLUX",
+]
+ANIMATION_SPACES = [
+    {"name": "fffiloni/KDTalker", "url": "https://fffiloni-kdtalker.hf.space", "api": "/gradio_infer"},
+    {"name": "vinthony/SadTalker", "url": None, "api": "/generate"},
+]
 
 # LLM — Brain
 LLM_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
@@ -141,40 +161,37 @@ def _is_real_image(path):
 
 
 def ensure_portrait():
-    """Get EVE's portrait, downloading if needed. Validates it's a real image."""
-    # Check local cache first — but verify it's not an LFS pointer
-    if EVE_PORTRAIT_LOCAL.exists() and _is_real_image(EVE_PORTRAIT_LOCAL):
-        return str(EVE_PORTRAIT_LOCAL)
-
-    # Check assets directory
-    assets_portrait = SCRIPT_DIR.parent / "assets" / "eve-portrait.png"
-    if assets_portrait.exists() and _is_real_image(assets_portrait):
-        return str(assets_portrait)
-
-    # Download from HuggingFace
-    log("Downloading EVE portrait (local file is LFS pointer or missing)...")
+    """Get EVE's portrait. Tries local file, then cascades through backup URLs.
+    NEVER returns a placeholder — always a real portrait image."""
     import urllib.request
-    EVE_PORTRAIT_LOCAL.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        urllib.request.urlretrieve(EVE_PORTRAIT_URL, str(EVE_PORTRAIT_LOCAL))
-        if _is_real_image(EVE_PORTRAIT_LOCAL):
-            log("Portrait cached", "OK")
-            return str(EVE_PORTRAIT_LOCAL)
-    except Exception as e:
-        log(f"Portrait download failed: {e}", "WARN")
 
-    # Final fallback — generate a styled placeholder
-    log("Creating placeholder portrait", "WARN")
-    from PIL import Image as PILImage, ImageDraw
-    img = PILImage.new("RGB", (512, 512), color=(20, 20, 30))
-    draw = ImageDraw.Draw(img)
-    # Simple gradient-ish circle as face placeholder
-    for i in range(80, 0, -1):
-        c = int(40 + i * 1.5)
-        draw.ellipse([256-i*2, 200-i*2, 256+i*2, 200+i*2], fill=(c, c//2, c))
-    draw.text((190, 420), "Upload a portrait", fill=(120, 120, 140))
-    img.save(str(EVE_PORTRAIT_LOCAL))
-    return str(EVE_PORTRAIT_LOCAL)
+    # Check local files first — but verify they're real images, not LFS pointers
+    for candidate in [
+        EVE_PORTRAIT_LOCAL,
+        SCRIPT_DIR / "eve-portrait.png",
+        SCRIPT_DIR / "eve-portrait.jpg",
+    ]:
+        if candidate.exists() and _is_real_image(candidate):
+            log(f"Portrait found: {candidate}", "OK")
+            return str(candidate)
+
+    # Download from fallback chain — try each URL until one works
+    EVE_PORTRAIT_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+    for url in EVE_PORTRAIT_URLS:
+        try:
+            log(f"Downloading portrait from {url[:60]}...")
+            urllib.request.urlretrieve(url, str(EVE_PORTRAIT_LOCAL))
+            if _is_real_image(EVE_PORTRAIT_LOCAL):
+                log("Portrait cached", "OK")
+                return str(EVE_PORTRAIT_LOCAL)
+            else:
+                log(f"Downloaded file not a valid image, trying next...", "WARN")
+        except Exception as e:
+            log(f"Portrait download failed ({url[:40]}...): {e}", "WARN")
+
+    # This should never happen with 4 backup URLs, but log clearly if it does
+    log("ALL portrait URLs failed — this should not happen", "ERR")
+    raise RuntimeError("No portrait available. Check network and EVE_PORTRAIT_URLS.")
 
 
 # ─── Gradio Client Helper ───────────────────────────────────────────────────
@@ -595,7 +612,8 @@ def eve_animate(portrait_path, audio_path):
 # ─── 2D to 4D Pipeline Agents ────────────────────────────────────────────────
 
 def agent_depth(portrait_path):
-    """Depth Agent: depth-anything-v2 via HF Inference API -> depth map image."""
+    """Depth Agent: depth-anything-v2 via HF Inference API -> depth map image.
+    Cascades through DEPTH_MODELS backup list."""
     from huggingface_hub import InferenceClient
     from PIL import Image
     import io
@@ -603,120 +621,106 @@ def agent_depth(portrait_path):
     log("Depth Agent analyzing portrait...", "PIPE")
     client = InferenceClient(token=HF_TOKEN)
 
-    start = time.time()
     with open(portrait_path, "rb") as f:
         image_bytes = f.read()
 
-    result = client.depth_estimation(
-        image=image_bytes,
-        model="depth-anything/Depth-Anything-V2-Large-hf",
-    )
-    elapsed = time.time() - start
+    # Try each depth model in the backup chain
+    for model_id in DEPTH_MODELS:
+        try:
+            log(f"Depth Agent trying {model_id}...", "PIPE")
+            start = time.time()
+            result = client.depth_estimation(
+                image=image_bytes,
+                model=model_id,
+            )
+            elapsed = time.time() - start
 
-    # Result has .depth (PIL Image) and .predicted_depth
-    depth_image = None
-    if hasattr(result, "depth"):
-        depth_image = result.depth
-    elif isinstance(result, Image.Image):
-        depth_image = result
-    elif isinstance(result, dict) and "depth" in result:
-        depth_image = result["depth"]
-        if isinstance(depth_image, bytes):
-            depth_image = Image.open(io.BytesIO(depth_image))
+            depth_image = None
+            if hasattr(result, "depth"):
+                depth_image = result.depth
+            elif isinstance(result, Image.Image):
+                depth_image = result
+            elif isinstance(result, dict) and "depth" in result:
+                depth_image = result["depth"]
+                if isinstance(depth_image, bytes):
+                    depth_image = Image.open(io.BytesIO(depth_image))
 
-    if depth_image is None:
-        log("Depth Agent: unexpected result format", "ERR")
-        return None
+            if depth_image is not None:
+                import tempfile
+                depth_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+                depth_image.save(depth_path)
+                log(f"Depth Agent complete via {model_id} ({elapsed:.1f}s)", "OK")
+                return depth_path
+        except Exception as e:
+            log(f"Depth Agent {model_id} failed: {e}", "WARN")
 
-    import tempfile
-    depth_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
-    depth_image.save(depth_path)
+    log("Depth Agent: all models failed", "ERR")
+    return None
 
-    log(f"Depth Agent complete ({elapsed:.1f}s) -> {depth_path}", "OK")
-    return depth_path
+
+def _extract_image_path(result):
+    """Extract image file path from various Gradio return formats."""
+    if isinstance(result, str) and os.path.exists(result):
+        return result
+    if isinstance(result, dict):
+        p = result.get("path") or result.get("image")
+        if p and os.path.exists(str(p)):
+            return str(p)
+    if isinstance(result, (list, tuple)):
+        for item in result:
+            found = _extract_image_path(item)
+            if found:
+                return found
+    return None
 
 
 def agent_realism(portrait_path, depth_map_path):
-    """Realism Agent: eden-diffusion-studio fn_index 1 -> enhanced portrait."""
+    """Realism Agent: enhance portrait via REALISM_SPACES backup chain."""
     from gradio_client import Client, handle_file
 
-    log("Realism Agent enhancing portrait with Juggernaut XL...", "PIPE")
+    log("Realism Agent enhancing portrait...", "PIPE")
 
-    start = time.time()
-    try:
-        client = Client("AIBRUH/eden-diffusion-studio", token=HF_TOKEN)
-
-        # fn_index 1 = generate_images (SDXL / Juggernaut XL)
-        result = client.predict(
-            "photorealistic portrait of a woman, cinematic lighting, ultra detailed skin texture, "
-            "professional photography, 8k, depth of field",  # prompt
-            "cartoon, illustration, painting, sketch, blurry, low quality",  # negative_prompt
-            30,       # steps
-            7.5,      # guidance_scale
-            1024,     # width
-            1024,     # height
-            -1,       # seed
-            handle_file(portrait_path),  # init_image
-            0.35,     # strength (keep original likeness)
-            fn_index=1,
-        )
-    except Exception as e:
-        log(f"Realism Agent eden-studio failed: {e}", "WARN")
-        # Fallback: try simpler call or return original
+    # Try eden-diffusion-studio first
+    for space_id in REALISM_SPACES:
         try:
-            client = Client("AIBRUH/eden-diffusion-studio", token=HF_TOKEN)
-            result = client.predict(
-                "photorealistic portrait, cinematic lighting, ultra detailed",
-                "cartoon, blurry, low quality",
-                handle_file(portrait_path),
-                api_name="/generate_images",
-            )
-        except Exception as e2:
-            log(f"Realism Agent fallback also failed: {e2}", "WARN")
-            log("Realism Agent: using original portrait as fallback", "WARN")
-            return portrait_path
+            log(f"Realism Agent trying {space_id}...", "PIPE")
+            client = Client(space_id, token=HF_TOKEN)
+            start = time.time()
 
-    elapsed = time.time() - start
+            if "eden-diffusion-studio" in space_id:
+                result = client.predict(
+                    "photorealistic portrait of a woman, cinematic lighting, ultra detailed skin texture, "
+                    "professional photography, 8k, depth of field",
+                    "cartoon, illustration, painting, sketch, blurry, low quality",
+                    30, 7.5, 1024, 1024, -1,
+                    handle_file(portrait_path),
+                    0.35,
+                    fn_index=1,
+                )
+            else:
+                # Generic img2img call for backup spaces
+                result = client.predict(
+                    "photorealistic portrait, cinematic lighting, ultra detailed",
+                    handle_file(portrait_path),
+                    api_name="/predict",
+                )
 
-    # Extract image path from result
-    enhanced_path = None
-    if isinstance(result, str) and os.path.exists(result):
-        enhanced_path = result
-    elif isinstance(result, dict):
-        enhanced_path = result.get("path") or result.get("image")
-    elif isinstance(result, (list, tuple)):
-        for item in result:
-            if isinstance(item, str) and os.path.exists(item):
-                enhanced_path = item
-                break
-            if isinstance(item, dict):
-                p = item.get("path") or item.get("image")
-                if p and os.path.exists(str(p)):
-                    enhanced_path = str(p)
-                    break
-            if isinstance(item, list):
-                for sub in item:
-                    if isinstance(sub, str) and os.path.exists(sub):
-                        enhanced_path = sub
-                        break
-                    if isinstance(sub, dict):
-                        p = sub.get("path") or sub.get("image")
-                        if p and os.path.exists(str(p)):
-                            enhanced_path = str(p)
-                            break
-                if enhanced_path:
-                    break
+            elapsed = time.time() - start
+            enhanced_path = _extract_image_path(result)
+            if enhanced_path:
+                log(f"Realism Agent complete via {space_id} ({elapsed:.1f}s)", "OK")
+                return enhanced_path
+        except Exception as e:
+            log(f"Realism Agent {space_id} failed: {e}", "WARN")
 
-    if not enhanced_path:
-        log("Realism Agent: could not extract enhanced image, using original", "WARN")
-        return portrait_path
-
-    log(f"Realism Agent complete ({elapsed:.1f}s)", "OK")
-    return enhanced_path
+    log("Realism Agent: all spaces failed, using original portrait", "WARN")
+    return portrait_path
 
 
 def agent_animate_4d(enhanced_portrait_path):
-    """Animation Agent: KDTalker -> animated 4D video using silent intro audio."""
+    """Animation Agent: animate face via ANIMATION_SPACES backup chain."""
+    from gradio_client import Client, handle_file
+
     log("Animation Agent preparing 4D face animation...", "PIPE")
 
     # Generate a short intro audio for the animation
@@ -724,23 +728,51 @@ def agent_animate_4d(enhanced_portrait_path):
     audio_path = eve_speak(intro_text, engine="kokoro", voice_id="af_heart")
 
     if not audio_path:
-        # Fallback: try other engines
         audio_path = eve_speak(intro_text, engine="qwen3")
 
     if not audio_path:
         log("Animation Agent: no voice engine available for intro", "ERR")
         return None
 
-    start = time.time()
-    video_path = eve_animate(enhanced_portrait_path, audio_path)
-    elapsed = time.time() - start
+    # Try each animation space in the backup chain
+    for space_cfg in ANIMATION_SPACES:
+        try:
+            log(f"Animation Agent trying {space_cfg['name']}...", "PIPE")
+            try:
+                client = Client(space_cfg["name"], token=HF_TOKEN)
+            except Exception:
+                if space_cfg.get("url"):
+                    client = Client(space_cfg["url"], token=HF_TOKEN)
+                else:
+                    raise
 
-    if video_path:
-        log(f"Animation Agent complete ({elapsed:.1f}s) -> 4D video ready", "OK")
-    else:
-        log("Animation Agent: KDTalker returned no video", "ERR")
+            start = time.time()
+            result = client.predict(
+                handle_file(enhanced_portrait_path),
+                handle_file(audio_path),
+                api_name=space_cfg["api"],
+            )
+            elapsed = time.time() - start
 
-    return video_path
+            video_path = None
+            if isinstance(result, str) and os.path.exists(result):
+                video_path = result
+            elif isinstance(result, dict):
+                video_path = result.get("path") or result.get("video")
+            elif isinstance(result, tuple):
+                for item in result:
+                    if isinstance(item, str) and os.path.exists(item):
+                        video_path = item
+                        break
+
+            if video_path:
+                log(f"Animation Agent complete via {space_cfg['name']} ({elapsed:.1f}s)", "OK")
+                return video_path
+        except Exception as e:
+            log(f"Animation Agent {space_cfg['name']} failed: {e}", "WARN")
+
+    log("Animation Agent: all animation spaces failed", "ERR")
+    return None
 
 
 def pipeline_2d_to_4d(portrait_path, progress_callback=None):
