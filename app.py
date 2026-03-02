@@ -2025,15 +2025,37 @@ def build_playground(default_engine="kokoro", animate_face=True):
                                         "Voice failed — try again")
                 return
 
-            # After all audio finishes, generate face animation using last audio
-            # (user already heard the response — this is a visual bonus)
-            last_audio = all_audio_paths[-1] if all_audio_paths else None
-            if last_audio:
-                log("Live: starting face animation...", "PIPE")
+            # After all audio finishes, generate lip-synced face animation
+            # Concatenate ALL audio clips for accurate full lip sync
+            combined_audio = None
+            if all_audio_paths:
+                try:
+                    all_segments = []
+                    sr_out = None
+                    for ap in all_audio_paths:
+                        data, sr = sf.read(ap, dtype="int16")
+                        if len(data.shape) > 1:
+                            data = data[:, 0]
+                        all_segments.append(data)
+                        sr_out = sr
+                    if all_segments and sr_out:
+                        combined = np.concatenate(all_segments)
+                        import tempfile
+                        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                        sf.write(tmp.name, combined, sr_out)
+                        combined_audio = tmp.name
+                        log(f"Live: combined {len(all_audio_paths)} clips -> {combined_audio}", "OK")
+                except Exception as e:
+                    log(f"Live: audio concat failed: {e}, using last clip", "WARN")
+                    combined_audio = all_audio_paths[-1] if all_audio_paths else None
+
+            anim_audio = combined_audio or (all_audio_paths[-1] if all_audio_paths else None)
+            if anim_audio:
+                log("Live: starting face animation (full lip sync)...", "PIPE")
                 yield AdditionalOutputs(portrait_path, None, _transcript_text(),
                                         "Animating face...")
 
-                video_path = eve_animate(portrait_path, last_audio)
+                video_path = eve_animate(portrait_path, anim_audio)
                 if video_path and os.path.isfile(str(video_path)):
                     log(f"Live: face animated -> {video_path}", "OK")
                     yield AdditionalOutputs(portrait_path, video_path, _transcript_text(),
@@ -2177,13 +2199,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         yield (
                             gr.update(visible=False),
                             gr.update(value=_idle_video[0], visible=True),
-                            "EVE is here — speak to her",
+                            '<div class="eve-status">Give me a moment to sync with your API — I\'m worth the wait.</div>',
                             gr.update(),
                         )
                     else:
-                        yield (gr.update(), gr.update(), gr.update(), gr.update())
+                        yield (
+                            gr.update(), gr.update(),
+                            '<div class="eve-status">Give me a moment to sync with your API — I\'m worth the wait.</div>',
+                            gr.update(),
+                        )
 
-                    # Wait 15s for standby, then deliver greeting
+                    # Wait 15s for standby, then deliver greeting with lip-synced video
                     _t.sleep(15)
 
                     if _greeting_audio[0] and os.path.isfile(str(_greeting_audio[0])):
@@ -2191,7 +2217,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         yield (
                             gr.update(visible=False),
                             gr.update(value=vid, visible=True) if vid else gr.update(),
-                            "EVE is speaking...",
+                            '<div class="eve-status">Tap the mic and talk to me.</div>',
                             gr.update(value=_greeting_audio[0], visible=False),
                         )
                     # else: stay on idle, no greeting ready — no placeholder
