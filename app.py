@@ -1663,27 +1663,35 @@ def build_playground(default_engine="kokoro", animate_face=True):
     .eve-idle img { border-radius: 12px; }
     .eve-live-face { position: relative; }
 
-    /* Live mic — clean call-style icon */
-    .eve-mic-btn { display: flex; flex-direction: column; align-items: center; }
+    /* Live mic — large, centered, impossible to miss */
+    .eve-mic-btn {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; padding: 16px 0;
+    }
     .eve-mic-btn label { display: none !important; }
     .eve-mic-btn .webrtc-container,
     .eve-mic-btn video,
-    .eve-mic-btn audio { width: 80px !important; height: 80px !important; }
+    .eve-mic-btn audio {
+        width: 100px !important; height: 100px !important;
+        margin: 0 auto;
+    }
     .eve-mic-btn button {
-        width: 72px !important; height: 72px !important;
+        width: 96px !important; height: 96px !important;
         border-radius: 50% !important;
         background: linear-gradient(135deg, #ff6b9d, #c44dff) !important;
-        border: none !important; box-shadow: 0 4px 20px rgba(196, 77, 255, 0.4) !important;
+        border: none !important;
+        box-shadow: 0 6px 30px rgba(196, 77, 255, 0.5) !important;
         transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+        cursor: pointer;
     }
     .eve-mic-btn button:hover {
-        transform: scale(1.08) !important;
-        box-shadow: 0 6px 28px rgba(196, 77, 255, 0.6) !important;
+        transform: scale(1.1) !important;
+        box-shadow: 0 8px 36px rgba(196, 77, 255, 0.7) !important;
     }
     /* Pulse animation when mic is active/recording */
     @keyframes eve-mic-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(255, 107, 157, 0.5); }
-        50% { box-shadow: 0 0 0 14px rgba(255, 107, 157, 0); }
+        0% { box-shadow: 0 0 0 0 rgba(255, 107, 157, 0.6); }
+        50% { box-shadow: 0 0 0 20px rgba(255, 107, 157, 0); }
         100% { box-shadow: 0 0 0 0 rgba(255, 107, 157, 0); }
     }
     .eve-mic-btn button[aria-label*="Stop"],
@@ -1692,9 +1700,9 @@ def build_playground(default_engine="kokoro", animate_face=True):
         animation: eve-mic-pulse 1.8s ease-out infinite !important;
         background: linear-gradient(135deg, #ff3d7f, #a020f0) !important;
     }
-    .eve-mic-live {
-        color: #ff6b9d; font-size: 0.85em; text-align: center;
-        margin-top: 8px; letter-spacing: 0.1em;
+    .eve-mic-label {
+        color: #ff6b9d; font-size: 1.1em; text-align: center;
+        margin-bottom: 8px; letter-spacing: 0.15em; font-weight: 600;
     }
     """
 
@@ -2050,23 +2058,23 @@ def build_playground(default_engine="kokoro", animate_face=True):
             try:
                 from fastrtc import WebRTC, ReplyOnPause, get_cloudflare_turn_credentials
 
-                with gr.Row(equal_height=True):
-                    # LEFT: EVE's face — idle breathing animation via CSS
-                    with gr.Column(scale=2, elem_classes="eve-live-face"):
+                with gr.Row(equal_height=False):
+                    # LEFT: EVE's face
+                    with gr.Column(scale=1, min_width=300, elem_classes="eve-live-face"):
                         live_portrait = gr.Image(
                             value=portrait_path, label="EVE",
-                            show_label=False, height=400,
+                            show_label=False, height=360,
                             show_download_button=False,
                             elem_classes="eve-idle",
                         )
                         live_video = gr.Video(
                             label="Animated", visible=False,
-                            height=400, autoplay=True, loop=True,
+                            height=360, autoplay=True, loop=True,
                             show_download_button=False,
                         )
 
-                    # RIGHT: Mic + transcript
-                    with gr.Column(scale=2):
+                    # RIGHT: Mic button (prominent) + transcript below
+                    with gr.Column(scale=1, min_width=300):
                         rtc_config = get_cloudflare_turn_credentials(hf_token=HF_TOKEN) if HF_TOKEN else None
                         live_handler = ReplyOnPause(
                             _build_live_handler(),
@@ -2074,6 +2082,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                             can_interrupt=True,
                         )
 
+                        gr.HTML('<div class="eve-mic-label">TAP THE MIC TO START</div>')
                         live_webrtc = WebRTC(
                             label="",
                             modality="audio",
@@ -2081,11 +2090,10 @@ def build_playground(default_engine="kokoro", animate_face=True):
                             rtc_configuration=rtc_config,
                             elem_classes="eve-mic-btn",
                         )
-                        gr.HTML('<div class="eve-mic-live">TAP TO TALK</div>')
 
                         live_transcript = gr.Textbox(
                             value="", label="Transcript",
-                            interactive=False, lines=8, max_lines=12,
+                            interactive=False, lines=6, max_lines=10,
                         )
 
                 live_status = gr.Textbox(
