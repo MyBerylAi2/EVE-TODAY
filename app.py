@@ -1050,20 +1050,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
     .eve-banner p { color: #666; font-size: 0.95em; margin: 4px 0 0 0; letter-spacing: 0.15em; }
     .chat-panel .chatbot { min-height: 500px !important; }
 
-    /* EVE idle animation — subtle breathing + micro-movements while waiting */
-    @keyframes eve-breathe {
-        0%, 100% { transform: scale(1.0) translateY(0px); }
-        50% { transform: scale(1.008) translateY(-2px); }
-    }
-    @keyframes eve-glow {
-        0%, 100% { filter: brightness(1.0) saturate(1.0); }
-        30% { filter: brightness(1.03) saturate(1.05); }
-        70% { filter: brightness(1.01) saturate(1.02); }
-    }
-    .eve-idle img {
-        animation: eve-breathe 4s ease-in-out infinite, eve-glow 6s ease-in-out infinite;
-        border-radius: 12px;
-    }
+    /* EVE live face — clean, no animation effects on portrait */
+    .eve-idle img { border-radius: 12px; }
     .eve-live-face { position: relative; }
     """
 
@@ -1276,9 +1264,10 @@ def build_playground(default_engine="kokoro", animate_face=True):
          # ═══════════════════════════════════════════════════════════
          with gr.Tab("Live Mode", id="live"):
             gr.Markdown(
-                "### Real-Time Voice & Face Conversation\n"
-                "Click the microphone and speak to EVE. She responds in real-time, "
-                "then her face animates with full expression."
+                "### Live Conversation with EVE\n"
+                "Press **Record** to start a live call. Your mic stays on — "
+                "just speak naturally. EVE listens, thinks, responds with voice, "
+                "and her face comes alive."
             )
 
             try:
