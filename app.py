@@ -2622,13 +2622,13 @@ def main():
     log(f"Face Animation: {'Off' if args.text_only else 'KDTalker'}")
     log(f"Portrait: {ensure_portrait()}")
 
-    # ── Start ComfyUI in background (uses /data persistent storage) ──
-    if os.path.isdir("/data") or os.environ.get("SPACE_ID"):
-        log("Persistent storage detected — starting ComfyUI...", "PIPE")
+    # ── ComfyUI: only start if GPU + /data persistent storage both exist ──
+    if os.path.isdir("/data") and os.path.isdir("/data/comfyui"):
+        log("GPU + persistent storage detected — starting ComfyUI...", "PIPE")
         import threading
         threading.Thread(target=_start_comfyui, daemon=True).start()
     else:
-        log("No persistent storage (/data) — ComfyUI disabled, using HF API", "INFO")
+        log("No /data/comfyui — ComfyUI disabled, using HF Inference API for images", "INFO")
     print()
 
     app = build_playground(
