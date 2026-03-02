@@ -74,8 +74,16 @@ REALISM_SPACES = [
     "KingNish/Realtime-FLUX",
 ]
 ANIMATION_SPACES = [
-    {"name": "fffiloni/KDTalker", "url": "https://fffiloni-kdtalker.hf.space", "api": "/gradio_infer"},
-    {"name": "vinthony/SadTalker", "url": None, "api": "/generate"},
+    {"name": "fffiloni/KDTalker", "url": "https://fffiloni-kdtalker.hf.space", "api": "/gradio_infer",
+     "params": lambda img, aud: dict(source_image=img, driven_audio=aud)},
+    {"name": "multimodalart/MoDA-fast-talking-head", "url": None, "api": "/generate_motion",
+     "params": lambda img, aud: dict(source_image_path=img, driving_audio_path=aud,
+                                      emotion_name="Happiness", cfg_scale=1.2)},
+    {"name": "multimodalart/ltx2-audio-to-video", "url": None, "api": "/generate",
+     "params": lambda img, aud: dict(image_path=img, audio_path=aud,
+                                      prompt="A woman speaking, lips moving naturally, talking head, photorealistic",
+                                      negative_prompt="low quality, worst quality, deformed",
+                                      video_duration=4.0, seed=-1)},
 ]
 
 # LLM — Brain
@@ -596,11 +604,16 @@ def eve_animate(portrait_path, audio_path):
                     raise
 
             start = time.time()
-            result = client.predict(
-                handle_file(portrait_path),
-                handle_file(audio_path),
-                api_name=space_cfg["api"],
-            )
+            params_fn = space_cfg.get("params")
+            if params_fn:
+                kwargs = params_fn(handle_file(portrait_path), handle_file(audio_path))
+                result = client.predict(**kwargs, api_name=space_cfg["api"])
+            else:
+                result = client.predict(
+                    handle_file(portrait_path),
+                    handle_file(audio_path),
+                    api_name=space_cfg["api"],
+                )
             elapsed = time.time() - start
             log(f"Animation result type={type(result).__name__}: {str(result)[:200]}", "INFO")
 
