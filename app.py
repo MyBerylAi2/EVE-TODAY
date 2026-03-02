@@ -151,16 +151,24 @@ def ensure_portrait():
     log("Downloading EVE portrait (local file is LFS pointer or missing)...")
     import urllib.request
     EVE_PORTRAIT_LOCAL.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(EVE_PORTRAIT_URL, str(EVE_PORTRAIT_LOCAL))
+    try:
+        urllib.request.urlretrieve(EVE_PORTRAIT_URL, str(EVE_PORTRAIT_LOCAL))
+        if _is_real_image(EVE_PORTRAIT_LOCAL):
+            log("Portrait cached", "OK")
+            return str(EVE_PORTRAIT_LOCAL)
+    except Exception as e:
+        log(f"Portrait download failed: {e}", "WARN")
 
-    if _is_real_image(EVE_PORTRAIT_LOCAL):
-        log("Portrait cached", "OK")
-        return str(EVE_PORTRAIT_LOCAL)
-
-    # Final fallback — generate a placeholder
-    log("Portrait URL also failed, creating placeholder", "WARN")
-    from PIL import Image as PILImage
-    img = PILImage.new("RGB", (512, 512), color=(30, 30, 40))
+    # Final fallback — generate a styled placeholder
+    log("Creating placeholder portrait", "WARN")
+    from PIL import Image as PILImage, ImageDraw
+    img = PILImage.new("RGB", (512, 512), color=(20, 20, 30))
+    draw = ImageDraw.Draw(img)
+    # Simple gradient-ish circle as face placeholder
+    for i in range(80, 0, -1):
+        c = int(40 + i * 1.5)
+        draw.ellipse([256-i*2, 200-i*2, 256+i*2, 200+i*2], fill=(c, c//2, c))
+    draw.text((190, 420), "Upload a portrait", fill=(120, 120, 140))
     img.save(str(EVE_PORTRAIT_LOCAL))
     return str(EVE_PORTRAIT_LOCAL)
 
