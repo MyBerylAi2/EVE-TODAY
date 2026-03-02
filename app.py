@@ -1257,14 +1257,16 @@ def eve_speak(text, engine="kokoro", voice_id=None):
     except Exception as e:
         log(f"{engine} failed: {e}", "WARN")
 
-    # Cascade: Kokoro is always the reliable fallback (never fails)
-    fallback_order = ["kokoro", "orpheus", "qwen3", "chatterbox"]
-    for fb in fallback_order:
+    # Kokoro is always the nuclear fallback — always use af_heart, not the passed voice_id
+    for fb in ["kokoro", "qwen3"]:
         if fb == engine:
             continue
         try:
             log(f"Falling back to {fb}...", "WARN")
-            result = engines[fb]()
+            if fb == "kokoro":
+                result = voice_kokoro(text, "af_heart")
+            else:
+                result = engines[fb]()
             if result:
                 return result
         except Exception as e:
@@ -2060,8 +2062,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 if not speak_clause:
                     continue  # pure image tag, skip TTS
 
-                # TTS this clause — Groq Orpheus (realistic) → Kokoro fallback
-                clause_audio = eve_speak(speak_clause, engine="orpheus", voice_id="hannah")
+                # TTS: Groq Orpheus (realistic, fast) → Kokoro af_heart (bulletproof)
+                clause_audio = voice_groq_orpheus(speak_clause, "hannah")
+                if not clause_audio or not os.path.isfile(str(clause_audio)):
+                    log("Groq Orpheus failed in live, using Kokoro", "WARN")
+                    clause_audio = voice_kokoro(speak_clause, "af_heart")
                 if not clause_audio or not os.path.isfile(str(clause_audio)):
                     continue
                 all_audio_paths.append(clause_audio)
