@@ -26,6 +26,10 @@ USAGE:
 """
 
 import os
+
+# Disable Gradio SSR compilation — must be set before gradio import
+os.environ["GRADIO_SSR_MODE"] = "false"
+
 import sys
 import time
 import argparse
