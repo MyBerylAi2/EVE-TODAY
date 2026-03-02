@@ -4,3 +4,4 @@ numpy
 Pillow
 fastrtc[vad]
 soundfile
+websocket-client

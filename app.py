@@ -30,6 +30,11 @@ import os
 # Disable Gradio SSR compilation — must be set before gradio import
 os.environ["GRADIO_SSR_MODE"] = "false"
 
+# Use HF persistent storage for model caching (1TB at /data)
+if os.path.isdir("/data"):
+    os.environ.setdefault("HF_HOME", "/data/.huggingface")
+    os.environ.setdefault("TORCH_HOME", "/data/.torch")
+
 import sys
 import time
 import argparse
@@ -386,6 +391,306 @@ _IMAGE_TAG_RE = re.compile(r'\[IMAGE:\s*(.+?)\]', re.IGNORECASE)
 _VIDEO_TAG_RE = re.compile(r'\[VIDEO:\s*(.+?)\]', re.IGNORECASE)
 _MEDIA_TAG_RE = re.compile(r'\[(IMAGE|VIDEO):\s*(.+?)\]', re.IGNORECASE)
 
+# ─── ComfyUI Backend ─────────────────────────────────────────────────────────
+COMFYUI_DIR = "/data/comfyui"
+COMFYUI_URL = "http://127.0.0.1:8188"
+_comfyui_proc = None  # Holds subprocess reference
+_comfyui_ready = False
+
+
+def _ensure_comfyui_models():
+    """Download essential models to persistent storage on first boot."""
+    from huggingface_hub import hf_hub_download
+    ckpt_dir = os.path.join(COMFYUI_DIR, "models", "checkpoints")
+    vae_dir = os.path.join(COMFYUI_DIR, "models", "vae")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(vae_dir, exist_ok=True)
+
+    # RealVisXL V4.0 — same default as Eden's WorkflowCompiler
+    ckpt_path = os.path.join(ckpt_dir, "realvisxl_v40.safetensors")
+    if not os.path.isfile(ckpt_path):
+        log("Downloading RealVisXL V4.0 checkpoint (~6.5GB)...", "PIPE")
+        try:
+            downloaded = hf_hub_download(
+                repo_id="SG161222/RealVisXL_V4.0",
+                filename="RealVisXL_V4.0.safetensors",
+                local_dir=ckpt_dir,
+                token=HF_TOKEN,
+            )
+            # Rename to expected name
+            if downloaded and os.path.isfile(downloaded):
+                target = os.path.join(ckpt_dir, "realvisxl_v40.safetensors")
+                if downloaded != target:
+                    os.rename(downloaded, target)
+                log(f"Model downloaded: {target}", "OK")
+        except Exception as e:
+            log(f"Model download failed: {e}", "ERR")
+    else:
+        log("RealVisXL V4.0 already cached", "OK")
+
+
+def _start_comfyui():
+    """Launch ComfyUI server as background subprocess on port 8188."""
+    global _comfyui_proc, _comfyui_ready
+    import subprocess
+
+    # Clone ComfyUI if not present on persistent storage
+    if not os.path.isdir(COMFYUI_DIR):
+        log("Cloning ComfyUI to persistent storage...", "PIPE")
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/comfyanonymous/ComfyUI.git", COMFYUI_DIR],
+                timeout=120, check=True,
+            )
+            # Install ComfyUI requirements
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r",
+                 os.path.join(COMFYUI_DIR, "requirements.txt"), "--quiet"],
+                timeout=300,
+            )
+            log("ComfyUI installed", "OK")
+        except Exception as e:
+            log(f"ComfyUI clone failed: {e}", "ERR")
+            return None
+
+    # Ensure models are downloaded
+    _ensure_comfyui_models()
+
+    # Link model directories so ComfyUI finds them
+    comfy_models = os.path.join(COMFYUI_DIR, "models")
+    if os.path.isdir(comfy_models):
+        log(f"ComfyUI models dir: {comfy_models}", "INFO")
+
+    # Start ComfyUI server
+    log("Starting ComfyUI server on :8188...", "PIPE")
+    try:
+        _comfyui_proc = subprocess.Popen(
+            [sys.executable, "main.py",
+             "--listen", "127.0.0.1",
+             "--port", "8188",
+             "--gpu-only",
+             "--dont-print-server"],
+            cwd=COMFYUI_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except Exception as e:
+        log(f"ComfyUI start failed: {e}", "ERR")
+        return None
+
+    # Wait for ComfyUI to be ready
+    for attempt in range(60):  # 60s timeout (model loading takes time)
+        try:
+            resp = requests.get(f"{COMFYUI_URL}/system_stats", timeout=2)
+            if resp.status_code == 200:
+                _comfyui_ready = True
+                log("ComfyUI ready on :8188", "OK")
+                return _comfyui_proc
+        except Exception:
+            pass
+        time.sleep(1)
+
+    log("ComfyUI startup timeout (60s) — will use HF API fallback", "WARN")
+    return _comfyui_proc
+
+
+# ─── Eden WorkflowCompiler (ported from EDEN-REALISM-REMIXED) ─────────────────
+class EdenWorkflowCompiler:
+    """Compile natural language prompts into ComfyUI workflow JSON.
+    Simplified port of EDEN-REALISM-REMIXED/main.py WorkflowCompiler."""
+
+    ASPECT_RATIOS = {
+        "portrait": (832, 1216),
+        "landscape": (1216, 832),
+        "square": (1024, 1024),
+        "cinematic": (1344, 768),
+        "ultrawide": (1920, 816),
+    }
+
+    SAMPLER_CONFIGS = {
+        "photorealistic": {"sampler": "dpmpp_2m", "scheduler": "karras", "steps": 30, "cfg": 7.0},
+        "cinematic": {"sampler": "dpmpp_2m", "scheduler": "simple", "steps": 35, "cfg": 6.5},
+        "default": {"sampler": "dpmpp_2m", "scheduler": "normal", "steps": 25, "cfg": 7.0},
+    }
+
+    def compile(self, prompt, style="photorealistic", aspect="square"):
+        """Compile a prompt into ComfyUI workflow JSON."""
+        width, height = self.ASPECT_RATIOS.get(aspect, (1024, 1024))
+        sampler = self.SAMPLER_CONFIGS.get(style, self.SAMPLER_CONFIGS["default"])
+
+        # Build positive prompt with Eden enhancement
+        positive = _eden_enhance_prompt(prompt, "image")
+        negative = EDEN_NEGATIVE
+
+        # ComfyUI workflow JSON — node graph
+        workflow = {
+            "10": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "realvisxl_v40.safetensors"}
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": positive, "clip": ["10", 1]}
+            },
+            "7": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative, "clip": ["10", 1]}
+            },
+            "5": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": width, "height": height, "batch_size": 1}
+            },
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": int(time.time()) % (2**32),
+                    "steps": sampler["steps"],
+                    "cfg": sampler["cfg"],
+                    "sampler_name": sampler["sampler"],
+                    "scheduler": sampler["scheduler"],
+                    "denoise": 1.0,
+                    "model": ["10", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                }
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["3", 0], "vae": ["10", 2]}
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "eve_imagine", "images": ["8", 0]}
+            },
+        }
+        return workflow
+
+    def compile_video(self, prompt, aspect="cinematic", frames=16):
+        """Compile a video prompt — batch frames workflow."""
+        width, height = self.ASPECT_RATIOS.get(aspect, (1344, 768))
+        positive = _eden_enhance_prompt(prompt, "video")
+        negative = EDEN_NEGATIVE
+
+        workflow = {
+            "10": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "realvisxl_v40.safetensors"}
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": positive, "clip": ["10", 1]}
+            },
+            "7": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative, "clip": ["10", 1]}
+            },
+            "5": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": width, "height": height, "batch_size": frames}
+            },
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": int(time.time()) % (2**32),
+                    "steps": 25,
+                    "cfg": 6.0,
+                    "sampler_name": "dpmpp_2m",
+                    "scheduler": "karras",
+                    "denoise": 1.0,
+                    "model": ["10", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                }
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["3", 0], "vae": ["10", 2]}
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "eve_envision", "images": ["8", 0]}
+            },
+        }
+        return workflow
+
+
+def _comfyui_generate(workflow_json, timeout=60):
+    """Submit workflow to local ComfyUI server, wait for result, return image path."""
+    import json as _json
+    import tempfile
+    import urllib.request
+
+    if not _comfyui_ready:
+        return None
+
+    client_id = f"eve_{int(time.time())}"
+
+    # Queue prompt via REST
+    try:
+        resp = requests.post(
+            f"{COMFYUI_URL}/prompt",
+            json={"prompt": workflow_json, "client_id": client_id},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            log(f"ComfyUI queue failed: {resp.status_code}", "WARN")
+            return None
+        prompt_id = resp.json()["prompt_id"]
+    except Exception as e:
+        log(f"ComfyUI queue error: {e}", "WARN")
+        return None
+
+    # Wait for completion via WebSocket
+    try:
+        import websocket
+        ws = websocket.create_connection(
+            f"ws://127.0.0.1:8188/ws?clientId={client_id}",
+            timeout=timeout,
+        )
+        start = time.time()
+        while time.time() - start < timeout:
+            msg = _json.loads(ws.recv())
+            if msg.get("type") == "executing":
+                if msg.get("data", {}).get("node") is None:
+                    break  # Execution complete
+            if msg.get("type") == "execution_error":
+                log(f"ComfyUI execution error: {msg}", "ERR")
+                ws.close()
+                return None
+        ws.close()
+    except Exception as e:
+        log(f"ComfyUI WebSocket error: {e}", "WARN")
+        return None
+
+    # Fetch result from history
+    try:
+        history = requests.get(
+            f"{COMFYUI_URL}/history/{prompt_id}", timeout=10
+        ).json()
+        outputs = history.get(prompt_id, {}).get("outputs", {})
+        for node_id, node_output in outputs.items():
+            if "images" in node_output:
+                img_info = node_output["images"][0]
+                filename = img_info["filename"]
+                subfolder = img_info.get("subfolder", "")
+                url = f"{COMFYUI_URL}/view?filename={filename}"
+                if subfolder:
+                    url += f"&subfolder={subfolder}"
+                img_data = urllib.request.urlopen(url).read()
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tmp.write(img_data)
+                tmp.flush()
+                log(f"ComfyUI generated: {tmp.name}", "OK")
+                return tmp.name
+    except Exception as e:
+        log(f"ComfyUI result fetch error: {e}", "WARN")
+
+    return None
+
+
 # ─── Eden Negative Keywords (from Eden Realism Engine) ────────────────────────
 # Anti-uncanny-valley system — 200+ terms organized by category
 EDEN_NEGATIVE = ", ".join([
@@ -431,13 +736,28 @@ def _eden_enhance_prompt(prompt, media_type="image"):
 
 
 def eve_imagine(prompt):
-    """Generate an image from EVE's imagination via HF Inference API.
-    Uses Eden-quality prompt enhancement and negative keywords."""
-    from huggingface_hub import InferenceClient
+    """Generate image: ComfyUI local (high quality) → HF API (fallback).
+    Uses Eden WorkflowCompiler + anti-uncanny-valley negative keywords."""
     import tempfile
-
-    enhanced = _eden_enhance_prompt(prompt, "image")
     log(f"EVE imagining: \"{prompt[:60]}\"...", "PIPE")
+
+    # ── Try ComfyUI first (local T4 GPU, full pipeline) ──
+    if _comfyui_ready:
+        try:
+            compiler = EdenWorkflowCompiler()
+            workflow = compiler.compile(prompt, style="photorealistic")
+            start = time.time()
+            result = _comfyui_generate(workflow, timeout=45)
+            elapsed = time.time() - start
+            if result:
+                log(f"EVE imagined via ComfyUI ({elapsed:.1f}s): {result}", "OK")
+                return result
+        except Exception as e:
+            log(f"ComfyUI imagine failed: {e}, falling back to HF API", "WARN")
+
+    # ── Fallback: HF Inference API ──
+    from huggingface_hub import InferenceClient
+    enhanced = _eden_enhance_prompt(prompt, "image")
     client = InferenceClient(token=HF_TOKEN)
 
     models = [
@@ -447,7 +767,6 @@ def eve_imagine(prompt):
     for model in models:
         try:
             start = time.time()
-            # FLUX doesn't support negative_prompt param — append to prompt
             if "FLUX" in model:
                 gen_prompt = f"{enhanced}. Avoid: {EDEN_NEGATIVE[:200]}"
                 image = client.text_to_image(gen_prompt, model=model)
@@ -458,7 +777,7 @@ def eve_imagine(prompt):
             if image:
                 tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
                 image.save(tmp.name)
-                log(f"EVE imagined ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
+                log(f"EVE imagined via HF API ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
                 return tmp.name
         except Exception as e:
             log(f"Imagine failed ({model}): {e}", "WARN")
@@ -469,16 +788,30 @@ def eve_imagine(prompt):
 
 
 def eve_envision(prompt):
-    """Generate a short video from EVE's imagination via HF Inference API.
-    Returns path to generated video, or None if all models fail."""
-    from huggingface_hub import InferenceClient
+    """Generate video: ComfyUI local → HF API → still image fallback.
+    Uses Eden WorkflowCompiler for cinematic video generation."""
     import tempfile
-
-    enhanced = _eden_enhance_prompt(prompt, "video")
     log(f"EVE envisioning: \"{prompt[:60]}\"...", "PIPE")
+
+    # ── Try ComfyUI first (local T4 GPU) ──
+    if _comfyui_ready:
+        try:
+            compiler = EdenWorkflowCompiler()
+            workflow = compiler.compile_video(prompt, aspect="cinematic", frames=16)
+            start = time.time()
+            result = _comfyui_generate(workflow, timeout=90)
+            elapsed = time.time() - start
+            if result:
+                log(f"EVE envisioned via ComfyUI ({elapsed:.1f}s): {result}", "OK")
+                return result
+        except Exception as e:
+            log(f"ComfyUI envision failed: {e}, falling back to HF API", "WARN")
+
+    # ── Fallback: HF Inference API ──
+    from huggingface_hub import InferenceClient
+    enhanced = _eden_enhance_prompt(prompt, "video")
     client = InferenceClient(token=HF_TOKEN)
 
-    # Video models available on HF Inference
     models = [
         "tencent/HunyuanVideo-PromptRewrite",
         "ali-vilab/text-to-video-ms-1.7b",
@@ -492,14 +825,14 @@ def eve_envision(prompt):
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 tmp.write(video)
                 tmp.flush()
-                log(f"EVE envisioned ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
+                log(f"EVE envisioned via HF API ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
                 return tmp.name
         except Exception as e:
             log(f"Envision failed ({model}): {e}", "WARN")
             continue
 
-    # Fallback: generate a still image instead
-    log("Video gen failed — falling back to image", "WARN")
+    # Final fallback: generate a still image instead
+    log("Video gen failed — falling back to still image", "WARN")
     return eve_imagine(prompt)
 
 
@@ -2163,6 +2496,11 @@ def main():
     print("  ├─ Dia 1.6B      — ~2-5s  — (laughs) (sighs) nonverbal")
     print("  └─ Chatterbox    — ~3-5s  — voice cloning fallback")
     print()
+    print("  Image/Video Generation:")
+    print("  ├─ ComfyUI       — local T4 GPU, Eden WorkflowCompiler")
+    print("  │  └─ RealVisXL V4.0 + Eden negative keywords")
+    print("  └─ HF Inference  — FLUX.1-schnell / SDXL (fallback)")
+    print()
 
     if not HF_TOKEN:
         log("HF_TOKEN not set. Export it:", "ERR")
@@ -2173,6 +2511,14 @@ def main():
     log(f"Default Voice: {args.voice}")
     log(f"Face Animation: {'Off' if args.text_only else 'KDTalker'}")
     log(f"Portrait: {ensure_portrait()}")
+
+    # ── Start ComfyUI in background (uses /data persistent storage) ──
+    if os.path.isdir("/data") or os.environ.get("SPACE_ID"):
+        log("Persistent storage detected — starting ComfyUI...", "PIPE")
+        import threading
+        threading.Thread(target=_start_comfyui, daemon=True).start()
+    else:
+        log("No persistent storage (/data) — ComfyUI disabled, using HF API", "INFO")
     print()
 
     app = build_playground(
