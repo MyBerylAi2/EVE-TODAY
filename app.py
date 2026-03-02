@@ -1704,6 +1704,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
         color: #ff6b9d; font-size: 1.1em; text-align: center;
         margin-bottom: 8px; letter-spacing: 0.15em; font-weight: 600;
     }
+    .eve-mic-column {
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        min-height: 300px;
+    }
+    .eve-transcript-corner {
+        max-width: 350px;
+    }
+    .eve-transcript-corner textarea {
+        font-size: 0.85em !important;
+    }
     """
 
     _gradio_major = int(gr.__version__.split(".")[0])
@@ -2058,6 +2069,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
             try:
                 from fastrtc import WebRTC, ReplyOnPause, get_cloudflare_turn_credentials
 
+                # Transcript in top-right corner
+                with gr.Row():
+                    with gr.Column():
+                        pass  # spacer
+                    with gr.Column(elem_classes="eve-transcript-corner"):
+                        live_transcript = gr.Textbox(
+                            value="", label="Transcript",
+                            interactive=False, lines=3, max_lines=5,
+                        )
+
+                # Face + Mic side by side, no overlap
                 with gr.Row(equal_height=False):
                     # LEFT: EVE's face
                     with gr.Column(scale=1, min_width=300, elem_classes="eve-live-face"):
@@ -2073,8 +2095,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
                             show_download_button=False,
                         )
 
-                    # RIGHT: Mic button (prominent) + transcript below
-                    with gr.Column(scale=1, min_width=300):
+                    # RIGHT: Just the mic button, big and clear
+                    with gr.Column(scale=1, min_width=200, elem_classes="eve-mic-column"):
                         rtc_config = get_cloudflare_turn_credentials(hf_token=HF_TOKEN) if HF_TOKEN else None
                         live_handler = ReplyOnPause(
                             _build_live_handler(),
@@ -2089,11 +2111,6 @@ def build_playground(default_engine="kokoro", animate_face=True):
                             mode="send-receive",
                             rtc_configuration=rtc_config,
                             elem_classes="eve-mic-btn",
-                        )
-
-                        live_transcript = gr.Textbox(
-                            value="", label="Transcript",
-                            interactive=False, lines=6, max_lines=10,
                         )
 
                 live_status = gr.Textbox(
