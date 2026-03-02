@@ -1753,122 +1753,42 @@ def build_playground(default_engine="kokoro", animate_face=True):
     _greeting_video = [None]
     _greeting_audio = [None]
 
-    def _generate_idle_video():
-        """Generate a short idle animation (gentle smile) in background."""
-        import wave, tempfile, struct
-        try:
-            # Create a 10-second silence WAV for a longer idle loop
-            silence_path = os.path.join(tempfile.gettempdir(), "eve_silence.wav")
-            with wave.open(silence_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(24000)
-                # 10 seconds of near-silence (tiny noise so animation spaces don't reject it)
-                frames = [struct.pack("<h", (i % 3) - 1) for i in range(240000)]
-                wf.writeframes(b"".join(frames))
-
-            log("Generating idle smile animation...", "PIPE")
-            video = eve_animate(portrait_path, silence_path)
-            if video and os.path.isfile(str(video)):
-                _idle_video[0] = video
-                log(f"Idle animation ready: {video}", "OK")
-            else:
-                log("Idle animation failed — will use CSS breathing instead", "WARN")
-        except Exception as e:
-            log(f"Idle animation error: {e}", "WARN")
-
-    # Kick off idle video generation in a background thread
-    import threading
-    threading.Thread(target=_generate_idle_video, daemon=True).start()
-
     def _generate_greeting():
-        """Generate EVE's greeting audio + animated video in background.
-        Waits for idle video to finish first, then pre-renders the greeting."""
+        """Generate EVE's greeting audio FAST — audio only over portrait.
+        No face animation on boot. Face animation starts after first user speaks."""
         import time as _time
-        # Wait for idle video to finish (max 120s)
-        for _ in range(120):
-            if _idle_video[0]:
-                break
-            _time.sleep(1)
-
-        log("Generating greeting audio + video...", "PIPE")
+        log("Generating greeting audio...", "PIPE")
         try:
             greeting_text = "Hey TJ, please wait while I sync with your API. I'm worth the wait."
-            # Max realism cascade: Orpheus (most human) → Dia (expressive) → Qwen3 → Kokoro
+            # Kokoro first — <0.3s, never fails. Orpheus fallback for emotion.
             audio_path = None
-            for eng, vid in [("orpheus", "tara"), ("dia", None), ("qwen3", None), ("kokoro", "af_heart")]:
+            for eng, vid in [("kokoro", "af_heart"), ("orpheus", "tara"), ("qwen3", None)]:
                 audio_path = eve_speak(greeting_text, engine=eng, voice_id=vid)
                 if audio_path and os.path.isfile(str(audio_path)):
-                    log(f"Greeting voice: {eng} (max realism)", "OK")
+                    log(f"Greeting voice ready: {eng}", "OK")
                     break
                 audio_path = None
-            if audio_path and os.path.isfile(str(audio_path)):
+            if audio_path:
                 _greeting_audio[0] = audio_path
-                log(f"Greeting audio ready: {audio_path}", "OK")
-                # Animate the greeting
-                video_path = eve_animate(portrait_path, audio_path)
-                if video_path and os.path.isfile(str(video_path)):
-                    _greeting_video[0] = video_path
-                    log(f"Greeting video ready: {video_path}", "OK")
-                else:
-                    log("Greeting video failed — will play audio only", "WARN")
+                # Generate lip-sync video in background AFTER audio is ready
+                # So audio plays fast, video arrives as a bonus
+                def _animate_greeting():
+                    video_path = eve_animate(portrait_path, audio_path)
+                    if video_path and os.path.isfile(str(video_path)):
+                        _greeting_video[0] = video_path
+                        log(f"Greeting video ready: {video_path}", "OK")
+                threading.Thread(target=_animate_greeting, daemon=True).start()
             else:
-                log("Greeting audio failed — EVE will stay silent on load", "WARN")
+                log("Greeting audio failed", "WARN")
         except Exception as e:
             log(f"Greeting generation error: {e}", "WARN")
 
+    import threading
     threading.Thread(target=_generate_greeting, daemon=True).start()
 
-    # ─── Expression Clip Library: Varied idle animations ─────────────
-    _expression_clips = []  # list of video paths for random idle selection
-
-    def _generate_expression_clips():
-        """Generate multiple idle animation clips with different audio patterns.
-        Each pattern drives slightly different facial movement for variety."""
-        import wave, struct, random as _rnd
-
-        # Wait for idle video to finish first (it's the baseline)
-        import time as _time
-        for _ in range(180):
-            if _idle_video[0]:
-                break
-            _time.sleep(1)
-
-        # The first idle video is already generated — add it to the library
-        if _idle_video[0] and os.path.isfile(str(_idle_video[0])):
-            _expression_clips.append(_idle_video[0])
-
-        # Generate 3 more clips with different audio patterns
-        patterns = [
-            ("nod", lambda i: struct.pack("<h", int(80 * ((i // 4000) % 2)))),     # rhythmic pulse
-            ("blink", lambda i: struct.pack("<h", int(40 * ((i // 8000) % 3)))),    # slow blink rhythm
-            ("think", lambda i: struct.pack("<h", int(60 * _rnd.choice([-1, 0, 1])))),  # gentle random
-        ]
-
-        for name, pattern_fn in patterns:
-            try:
-                silence_path = os.path.join(tempfile.gettempdir(), f"eve_{name}.wav")
-                with wave.open(silence_path, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(24000)
-                    # 8 seconds of patterned near-silence
-                    frames = [pattern_fn(i) for i in range(192000)]
-                    wf.writeframes(b"".join(frames))
-
-                log(f"Generating expression clip: {name}...", "PIPE")
-                video = eve_animate(portrait_path, silence_path)
-                if video and os.path.isfile(str(video)):
-                    _expression_clips.append(video)
-                    log(f"Expression clip '{name}' ready ({len(_expression_clips)} total)", "OK")
-                else:
-                    log(f"Expression clip '{name}' failed — skipping", "WARN")
-            except Exception as e:
-                log(f"Expression clip '{name}' error: {e}", "WARN")
-
-        log(f"Expression library complete: {len(_expression_clips)} clips", "OK")
-
-    threading.Thread(target=_generate_expression_clips, daemon=True).start()
+    # Expression clips generated lazily after first real conversation
+    # (not on boot — kills startup time)
+    _expression_clips = []
 
     def _random_idle_clip():
         """Return a random idle clip from the expression library, or the base idle."""
@@ -2239,55 +2159,61 @@ def build_playground(default_engine="kokoro", animate_face=True):
             # Page load: show idle animation, then greet after 15s
             if live_portrait and live_video and live_status:
                 def _on_page_load():
-                    """Generator: portrait → greeting (plays once) → back to portrait (waiting patiently)."""
+                    """Fast load: portrait shows instantly, greeting plays as soon as audio ready."""
                     import time as _t
 
-                    # Yield 1: Show portrait immediately — EVE looking at camera, smiling
+                    # Yield 1: Portrait IMMEDIATELY — no waiting for anything
                     yield (
                         gr.update(value=portrait_path, visible=True),
                         gr.update(visible=False),
-                        '<div class="eve-status">Give me a moment to sync with your API — I\'m worth the wait.</div>',
+                        '<div class="eve-status">Give me a moment to sync — I\'m worth the wait.</div>',
                         gr.update(),
                     )
 
-                    # Wait for greeting to be ready (up to 30s)
-                    for _ in range(30):
+                    # Wait for greeting audio (Kokoro is <0.3s so this is fast)
+                    for _ in range(15):
                         if _greeting_audio[0] and os.path.isfile(str(_greeting_audio[0])):
                             break
                         _t.sleep(1)
 
-                    # Yield 2: Play greeting — lip-synced video plays ONCE
-                    if _greeting_audio[0] and os.path.isfile(str(_greeting_audio[0])):
-                        vid = _greeting_video[0] if (_greeting_video[0] and os.path.isfile(str(_greeting_video[0]))) else None
-                        if vid:
-                            yield (
-                                gr.update(visible=False),           # hide portrait
-                                gr.update(value=vid, visible=True, loop=False),  # play video ONCE
-                                '<div class="eve-status"></div>',   # clear status while speaking
-                                gr.update(value=_greeting_audio[0], visible=False),  # play audio
-                            )
-                        else:
-                            # No video — just play audio over portrait
-                            yield (
-                                gr.update(visible=True),
-                                gr.update(visible=False),
-                                '<div class="eve-status"></div>',
-                                gr.update(value=_greeting_audio[0], visible=False),
-                            )
-
-                        # After greeting video plays once, EVE stays on last frame
-                        # Like a reporter on location — present, patient, alive
-                        # Video stays visible on its last frame (loop=False)
-                        _t.sleep(8)
-
-                        # Yield 3: Just update status — EVE stays live on screen
+                    if not (_greeting_audio[0] and os.path.isfile(str(_greeting_audio[0]))):
+                        # Audio not ready — EVE stays on portrait, status updates
                         yield (
-                            gr.update(visible=False),   # portrait stays hidden
-                            gr.update(),                # video stays as-is (last frame)
+                            gr.update(),
+                            gr.update(visible=False),
                             '<div class="eve-status">I\'m here. Tap the mic and talk to me.</div>',
                             gr.update(),
                         )
-                    # else: no greeting ready — stay on portrait
+                        return
+
+                    # Yield 2: Play greeting audio over portrait immediately
+                    yield (
+                        gr.update(value=portrait_path, visible=True),
+                        gr.update(visible=False),
+                        '<div class="eve-status"></div>',
+                        gr.update(value=_greeting_audio[0], visible=False),
+                    )
+
+                    # Wait for greeting duration (~4s) then check if video ready
+                    _t.sleep(5)
+
+                    # Yield 3: If lip-sync video arrived, show it. Otherwise stay on portrait.
+                    if _greeting_video[0] and os.path.isfile(str(_greeting_video[0])):
+                        yield (
+                            gr.update(visible=False),
+                            gr.update(value=_greeting_video[0], visible=True, loop=False),
+                            '<div class="eve-status"></div>',
+                            gr.update(),
+                        )
+                        _t.sleep(7)  # let video play through
+
+                    # Yield 4: EVE waiting patiently — portrait, status prompt
+                    yield (
+                        gr.update(value=portrait_path, visible=True),
+                        gr.update(visible=False),
+                        '<div class="eve-status">I\'m here. Tap the mic and talk to me.</div>',
+                        gr.update(),
+                    )
 
                 app.load(
                     fn=_on_page_load,
