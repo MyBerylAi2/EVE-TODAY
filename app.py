@@ -1053,6 +1053,28 @@ def build_playground(default_engine="kokoro", animate_face=True):
     /* EVE live face — clean, no animation effects on portrait */
     .eve-idle img { border-radius: 12px; }
     .eve-live-face { position: relative; }
+
+    /* Live mic — clean call-style icon */
+    .eve-mic-btn { display: flex; flex-direction: column; align-items: center; }
+    .eve-mic-btn label { display: none !important; }
+    .eve-mic-btn .webrtc-container,
+    .eve-mic-btn video,
+    .eve-mic-btn audio { width: 80px !important; height: 80px !important; }
+    .eve-mic-btn button {
+        width: 72px !important; height: 72px !important;
+        border-radius: 50% !important;
+        background: linear-gradient(135deg, #ff6b9d, #c44dff) !important;
+        border: none !important; box-shadow: 0 4px 20px rgba(196, 77, 255, 0.4) !important;
+        transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+    }
+    .eve-mic-btn button:hover {
+        transform: scale(1.08) !important;
+        box-shadow: 0 6px 28px rgba(196, 77, 255, 0.6) !important;
+    }
+    .eve-mic-live {
+        color: #ff6b9d; font-size: 0.85em; text-align: center;
+        margin-top: 8px; letter-spacing: 0.1em;
+    }
     """
 
     _gradio_major = int(gr.__version__.split(".")[0])
@@ -1066,19 +1088,21 @@ def build_playground(default_engine="kokoro", animate_face=True):
     # ─── Idle Animation: Pre-generate EVE's idle loop ────────────────
     # Generate a short "idle smile" video on startup so EVE looks alive
     _idle_video = [None]  # mutable container for thread safety
+    _greeting_video = [None]
+    _greeting_audio = [None]
 
     def _generate_idle_video():
         """Generate a short idle animation (gentle smile) in background."""
         import wave, tempfile, struct
         try:
-            # Create a 2-second silence WAV for the animation driver
+            # Create a 10-second silence WAV for a longer idle loop
             silence_path = os.path.join(tempfile.gettempdir(), "eve_silence.wav")
             with wave.open(silence_path, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(24000)
-                # 2 seconds of near-silence (tiny noise so animation spaces don't reject it)
-                frames = [struct.pack("<h", (i % 3) - 1) for i in range(48000)]
+                # 10 seconds of near-silence (tiny noise so animation spaces don't reject it)
+                frames = [struct.pack("<h", (i % 3) - 1) for i in range(240000)]
                 wf.writeframes(b"".join(frames))
 
             log("Generating idle smile animation...", "PIPE")
@@ -1094,6 +1118,39 @@ def build_playground(default_engine="kokoro", animate_face=True):
     # Kick off idle video generation in a background thread
     import threading
     threading.Thread(target=_generate_idle_video, daemon=True).start()
+
+    def _generate_greeting():
+        """Generate EVE's greeting audio + animated video in background.
+        Waits for idle video to finish first, then pre-renders the greeting."""
+        import time as _time
+        # Wait for idle video to finish (max 120s)
+        for _ in range(120):
+            if _idle_video[0]:
+                break
+            _time.sleep(1)
+
+        log("Generating greeting audio + video...", "PIPE")
+        try:
+            greeting_text = "Hello TJ! What would you like to talk about? What's on your mind?"
+            audio_path = eve_speak(greeting_text, engine="qwen3")
+            if not audio_path or not os.path.isfile(str(audio_path)):
+                audio_path = eve_speak(greeting_text, engine="kokoro", voice_id="af_heart")
+            if audio_path and os.path.isfile(str(audio_path)):
+                _greeting_audio[0] = audio_path
+                log(f"Greeting audio ready: {audio_path}", "OK")
+                # Animate the greeting
+                video_path = eve_animate(portrait_path, audio_path)
+                if video_path and os.path.isfile(str(video_path)):
+                    _greeting_video[0] = video_path
+                    log(f"Greeting video ready: {video_path}", "OK")
+                else:
+                    log("Greeting video failed — will play audio only", "WARN")
+            else:
+                log("Greeting audio failed — EVE will stay silent on load", "WARN")
+        except Exception as e:
+            log(f"Greeting generation error: {e}", "WARN")
+
+    threading.Thread(target=_generate_greeting, daemon=True).start()
 
     # ─── Live Mode: Real-Time Voice (WebRTC) ────────────────────────
     def _build_live_handler():
@@ -1192,8 +1249,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
             if len(live_history) > 20:
                 live_history[:] = live_history[-16:]
 
-            # TTS — speak
-            audio_path = eve_speak(eve_response, engine="kokoro", voice_id="af_heart")
+            # TTS — speak (Qwen3 for quality, falls back to Kokoro if needed)
+            audio_path = eve_speak(eve_response, engine="qwen3")
             if not audio_path or not os.path.isfile(str(audio_path)):
                 log("Live: TTS failed", "ERR")
                 yield AdditionalOutputs(portrait_path, None, _transcript_text(),
@@ -1265,9 +1322,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
          with gr.Tab("Live Mode", id="live"):
             gr.Markdown(
                 "### Live Conversation with EVE\n"
-                "Press **Record** to start a live call. Your mic stays on — "
-                "just speak naturally. EVE listens, thinks, responds with voice, "
-                "and her face comes alive."
+                "Tap the mic to start a live call. Your mic stays on — "
+                "just speak naturally. EVE listens, thinks, and responds."
             )
 
             try:
@@ -1298,11 +1354,13 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         )
 
                         live_webrtc = WebRTC(
-                            label="Microphone",
+                            label="",
                             modality="audio",
                             mode="send-receive",
                             rtc_configuration=rtc_config,
+                            elem_classes="eve-mic-btn",
                         )
+                        gr.HTML('<div class="eve-mic-live">TAP TO TALK</div>')
 
                         live_transcript = gr.Textbox(
                             value="", label="Transcript",
@@ -1312,6 +1370,12 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 live_status = gr.Textbox(
                     value="Ready — click the microphone and start talking",
                     label="Status", interactive=False, max_lines=1,
+                )
+
+                # Hidden audio for greeting playback
+                live_greeting_audio = gr.Audio(
+                    visible=False, autoplay=True, label="Greeting",
+                    show_download_button=False,
                 )
 
                 # Wire WebRTC with AdditionalOutputs:
@@ -1343,21 +1407,38 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     "Use the Chat Mode tab for text/voice conversation."
                 )
 
-            # Idle animation check — runs once on page load
+            # Page load: show idle animation, then greet after 15s
             if live_portrait and live_video and live_status:
-                def _check_idle():
-                    """Swap in idle animation video if ready when page loads."""
+                def _on_page_load():
+                    """Generator: show idle video immediately, then greeting after 15s."""
+                    import time as _t
+                    # Yield 1: idle animation
                     if _idle_video[0] and os.path.isfile(str(_idle_video[0])):
-                        return (
+                        yield (
                             gr.update(visible=False),
                             gr.update(value=_idle_video[0], visible=True),
                             "EVE is here — speak to her",
+                            gr.update(),
                         )
-                    return (gr.update(), gr.update(), gr.update())
+                    else:
+                        yield (gr.update(), gr.update(), gr.update(), gr.update())
+
+                    # Wait 15s for standby, then deliver greeting
+                    _t.sleep(15)
+
+                    if _greeting_audio[0] and os.path.isfile(str(_greeting_audio[0])):
+                        vid = _greeting_video[0] if (_greeting_video[0] and os.path.isfile(str(_greeting_video[0]))) else _idle_video[0]
+                        yield (
+                            gr.update(visible=False),
+                            gr.update(value=vid, visible=True) if vid else gr.update(),
+                            "EVE is speaking...",
+                            gr.update(value=_greeting_audio[0], visible=False),
+                        )
+                    # else: stay on idle, no greeting ready — no placeholder
 
                 app.load(
-                    fn=_check_idle,
-                    outputs=[live_portrait, live_video, live_status],
+                    fn=_on_page_load,
+                    outputs=[live_portrait, live_video, live_status, live_greeting_audio],
                 )
 
          # ═══════════════════════════════════════════════════════════
