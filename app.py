@@ -233,116 +233,235 @@ def eve_think(user_message, conversation_history):
     return eve_text
 
 
-# ─── Voice Engine: Kokoro (Primary — Fastest) ───────────────────────────────
+# ─── Voice Engine: Kokoro (Fast — <0.3s) ────────────────────────────────────
 def voice_kokoro(text, voice_id="af_heart", speed=0.9):
-    """Generate voice via Kokoro TTS. Sub-0.3s latency, 82M params."""
+    """Generate voice via Kokoro TTS. Sub-0.3s, 82M params, Apache 2.0.
+
+    NOTE: The official hexgrad/Kokoro-TTS Space DISABLES its API.
+    Strategy: Try HF Inference API first (model endpoint), then community Spaces.
+    """
     log(f"Kokoro [{voice_id}]: \"{text[:50]}\"...", "PIPE")
 
-    client = get_space_client("kokoro")
-    start = time.time()
-
-    result = client.predict(
-        text,
-        voice_id,
-        speed,
-        api_name="/generate"
-    )
-    elapsed = time.time() - start
-
-    audio = extract_audio_path(result)
-    if audio:
-        log(f"Kokoro voice ready ({elapsed:.1f}s)", "OK")
-    else:
-        log(f"Kokoro unexpected result: {type(result)}", "WARN")
-    return audio
-
-
-# ─── Voice Engine: Qwen3-TTS (Newest — 97ms Streaming) ──────────────────────
-def voice_qwen3(text, voice_description=None):
-    """Generate voice via Qwen3-TTS. 97ms streaming, natural language voice design."""
-    desc = voice_description or "A warm, friendly young woman with a slightly breathy voice, speaking naturally with gentle warmth and presence"
-    log(f"Qwen3-TTS: \"{text[:50]}\"...", "PIPE")
-
+    # Method 1: HF Inference API (most reliable — no Space needed)
     try:
-        # Try Voice Design Space first (most flexible)
-        client = get_space_client("qwen3-design")
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_TOKEN)
         start = time.time()
 
-        result = client.predict(
+        result = client.text_to_speech(
             text,
-            desc,
-            api_name="/generate"
+            model="hexgrad/Kokoro-82M",
         )
         elapsed = time.time() - start
 
+        if result:
+            # Result is bytes — save to temp file
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.write(result)
+            tmp.close()
+            log(f"Kokoro via Inference API ({elapsed:.1f}s)", "OK")
+            return tmp.name
+    except Exception as e:
+        log(f"Kokoro Inference API failed: {e}", "WARN")
+
+    # Method 2: Try the official Space anyway (may work with token)
+    try:
+        client = get_space_client("kokoro")
+        start = time.time()
+
+        # Try different api_name patterns
+        for api_name in ["/generate_all", "/generate", "/generate_speech", None]:
+            try:
+                if api_name:
+                    result = client.predict(text, voice_id, speed, api_name=api_name)
+                else:
+                    result = client.predict(text, voice_id, speed)
+                elapsed = time.time() - start
+                audio = extract_audio_path(result)
+                if audio:
+                    log(f"Kokoro Space ({elapsed:.1f}s)", "OK")
+                    return audio
+            except Exception:
+                continue
+    except Exception as e:
+        log(f"Kokoro Space failed: {e}", "WARN")
+
+    # Method 3: Community Space (Remsky/Kokoro-TTS-Zero has API enabled)
+    try:
+        from gradio_client import Client
+        client = Client("Remsky/Kokoro-TTS-Zero", token=HF_TOKEN)
+        start = time.time()
+
+        result = client.predict(text, voice_id, speed, api_name="/generate")
+        elapsed = time.time() - start
         audio = extract_audio_path(result)
         if audio:
-            log(f"Qwen3-TTS voice ready ({elapsed:.1f}s)", "OK")
+            log(f"Kokoro-Zero ({elapsed:.1f}s)", "OK")
             return audio
     except Exception as e:
-        log(f"Qwen3 Voice Design failed: {e}", "WARN")
+        log(f"Kokoro community Space failed: {e}", "WARN")
 
-    # Fallback to base Qwen3-TTS
+    return None
+
+
+# ─── Voice Engine: Qwen3-TTS (Default — 97ms Streaming) ─────────────────────
+def voice_qwen3(text, voice_description=None):
+    """Generate voice via Qwen3-TTS. 97ms streaming, natural language voice design.
+
+    Qwen3-TTS-12Hz-1.7B-VoiceDesign: Describe any voice in natural language.
+    Uses auto-discovery for Gradio API endpoints.
+    """
+    desc = voice_description or "A warm, friendly young woman with a slightly breathy voice, speaking naturally with gentle warmth and presence"
+    log(f"Qwen3-TTS: \"{text[:50]}\"...", "PIPE")
+
+    # Method 1: Voice Design Space (natural language → custom voice)
+    try:
+        client = get_space_client("qwen3-design")
+        start = time.time()
+
+        # Auto-discover API — try common endpoint names
+        for api_name in ["/voice_design", "/generate", "/synthesize", "/predict", None]:
+            try:
+                if api_name:
+                    result = client.predict(text, desc, api_name=api_name)
+                else:
+                    result = client.predict(text, desc)
+                elapsed = time.time() - start
+                audio = extract_audio_path(result)
+                if audio:
+                    log(f"Qwen3 Voice Design ({elapsed:.1f}s)", "OK")
+                    return audio
+            except Exception:
+                continue
+    except Exception as e:
+        log(f"Qwen3 Voice Design Space: {e}", "WARN")
+
+    # Method 2: Base Qwen3-TTS Space
     try:
         client = get_space_client("qwen3")
         start = time.time()
 
-        result = client.predict(
+        for api_name in ["/generate", "/synthesize", "/predict", None]:
+            try:
+                if api_name:
+                    result = client.predict(text, api_name=api_name)
+                else:
+                    result = client.predict(text)
+                elapsed = time.time() - start
+                audio = extract_audio_path(result)
+                if audio:
+                    log(f"Qwen3-TTS base ({elapsed:.1f}s)", "OK")
+                    return audio
+            except Exception:
+                continue
+    except Exception as e:
+        log(f"Qwen3-TTS Space: {e}", "WARN")
+
+    # Method 3: HF Inference API (model endpoint)
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_TOKEN)
+        start = time.time()
+
+        result = client.text_to_speech(
             text,
-            api_name="/generate"
+            model="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         )
         elapsed = time.time() - start
 
-        audio = extract_audio_path(result)
-        if audio:
-            log(f"Qwen3-TTS base voice ready ({elapsed:.1f}s)", "OK")
-        return audio
+        if result:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.write(result)
+            tmp.close()
+            log(f"Qwen3 via Inference API ({elapsed:.1f}s)", "OK")
+            return tmp.name
     except Exception as e:
-        log(f"Qwen3-TTS failed: {e}", "WARN")
-        return None
+        log(f"Qwen3 Inference API: {e}", "WARN")
+
+    return None
 
 
 # ─── Voice Engine: Orpheus (Premium — Most Human) ───────────────────────────
 def voice_orpheus(text, voice_id="tara"):
-    """Generate voice via Orpheus TTS. ~200ms streaming, emotion tags."""
+    """Generate voice via Orpheus TTS. ~200ms streaming, 3B params.
+
+    Supports emotion tags: <laugh>, <chuckle>, <sigh>, <gasp>, <yawn>
+    Voices (female): tara, leah, jess, mia, zoe
+    """
     log(f"Orpheus [{voice_id}]: \"{text[:50]}\"...", "PIPE")
 
     client = get_space_client("orpheus")
     start = time.time()
 
-    # Orpheus Space API — text, voice, optional emotion tags
-    result = client.predict(
-        text,
-        voice_id,
-        api_name="/generate"
-    )
-    elapsed = time.time() - start
+    # Try verified API endpoint names
+    for api_name in ["/generate_speech", "/generate", None]:
+        try:
+            if api_name:
+                result = client.predict(text, voice_id, api_name=api_name)
+            else:
+                result = client.predict(text, voice_id)
+            elapsed = time.time() - start
+            audio = extract_audio_path(result)
+            if audio:
+                log(f"Orpheus voice ready ({elapsed:.1f}s)", "OK")
+                return audio
+        except Exception:
+            continue
 
-    audio = extract_audio_path(result)
-    if audio:
-        log(f"Orpheus voice ready ({elapsed:.1f}s)", "OK")
-    else:
-        log(f"Orpheus unexpected result: {type(result)}", "WARN")
-    return audio
+    log("Orpheus: no working endpoint found", "WARN")
+    return None
 
 
 # ─── Voice Engine: Dia (Expressive — Dialogue) ──────────────────────────────
 def voice_dia(text):
-    """Generate voice via Dia 1.6B. Ultra-realistic dialogue with nonverbal."""
-    # Dia uses [S1] speaker tags
+    """Generate voice via Dia 1.6B. Ultra-realistic with nonverbal.
+
+    Supports: (laughs), (sighs), (gasps), (coughs), (clears throat)
+    Uses [S1] speaker tags.
+    """
     dia_text = f"[S1] {text}"
     log(f"Dia: \"{dia_text[:50]}\"...", "PIPE")
 
     client = get_space_client("dia")
     start = time.time()
 
-    result = client.predict(
-        dia_text,
-        api_name="/generate"
-    )
+    # Dia Space uses "generate_audio" endpoint with multiple params
+    try:
+        result = client.predict(
+            dia_text,           # text with [S1]/[S2] tags
+            "",                 # audio_prompt_text (empty = no cloning)
+            None,               # audio_prompt (None = no reference)
+            750,                # max_new_tokens
+            1.0,                # cfg_scale
+            1.3,                # temperature
+            0.95,               # top_p
+            35,                 # cfg_filter_top_k
+            1.0,                # speed_factor
+            -1,                 # seed (-1 = random)
+            api_name="/generate_audio"
+        )
+    except Exception:
+        # Try simpler call if full params fail
+        try:
+            result = client.predict(dia_text, api_name="/generate_audio")
+        except Exception:
+            result = client.predict(dia_text)
+
     elapsed = time.time() - start
 
-    audio = extract_audio_path(result)
+    # Dia returns [audio, seed, console_output]
+    audio = None
+    if isinstance(result, (list, tuple)):
+        for item in result:
+            a = extract_audio_path(item)
+            if a:
+                audio = a
+                break
+    else:
+        audio = extract_audio_path(result)
+
     if audio:
         log(f"Dia voice ready ({elapsed:.1f}s)", "OK")
     else:
