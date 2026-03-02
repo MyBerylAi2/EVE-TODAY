@@ -1,377 +1,473 @@
+#!/usr/bin/env python3
 """
-EDEN VOICE ENGINE - Bidirectional Live Conversation
-Beryl AI Labs · Eden Project · 2026
+═══════════════════════════════════════════════════════════════
+EVE TALK — Real-Time Conversational Avatar
+The Eden Project · Beryl AI Labs
 
-Two AI companions, each with their own voice and personality:
-  EVE  → Warm, intelligent, the Eden Project's core AI
-  LULU → Smooth, confident, seductive - Mahogany Hall's hostess
+Talk to EVE. She listens, thinks, speaks, and shows her face.
 
-Pipeline: User mic → Groq Whisper STT → LLM Brain → Kokoro TTS → She speaks back
+Pipeline:
+  You speak → Whisper STT → LLM Brain → Kokoro TTS → KDTalker → EVE responds
+
+USAGE:
+  python3 eve_talk.py                    # Launch Gradio UI
+  python3 eve_talk.py --share            # Public URL (shareable)
+  python3 eve_talk.py --text-only        # Skip face animation (faster)
+═══════════════════════════════════════════════════════════════
 """
 
-import gradio as gr
-import numpy as np
 import os
+import sys
 import json
 import time
 import tempfile
-import soundfile as sf
-from dataclasses import dataclass, field
+import argparse
+import threading
 from pathlib import Path
+from datetime import datetime
 
-# ── Lazy imports (loaded when needed) ──
-kokoro_pipeline = None
-groq_client = None
+# ─── Configuration ───
+HF_TOKEN = os.environ.get("HF_TOKEN", None)
+SCRIPT_DIR = Path(__file__).parent.resolve()
+VOICES_DIR = SCRIPT_DIR / "voices"
+VIDEOS_DIR = SCRIPT_DIR / "videos"
 
-def get_kokoro():
-    global kokoro_pipeline
-    if kokoro_pipeline is None:
-        import kokoro
-        kokoro_pipeline = kokoro.KPipeline(lang_code='a')
-        print("Kokoro TTS loaded")
-    return kokoro_pipeline
+# HF Spaces for pipeline components
+KDTALKER_SPACE = "fffiloni/KDTalker"
+KDTALKER_URL = "https://fffiloni-kdtalker.hf.space"
+KOKORO_SPACE = "hexgrad/Kokoro-TTS"
+CHATTERBOX_SPACE = "resembleai/Chatterbox"
 
-def get_groq():
-    global groq_client
-    if groq_client is None:
-        from groq import Groq
-        groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-        print("Groq client loaded")
-    return groq_client
+# EVE portrait
+EVE_PORTRAIT_URL = "https://huggingface.co/spaces/AIBRUH/eden-diffusion-studio/resolve/main/assets/eve-portrait.png"
+EVE_PORTRAIT_LOCAL = SCRIPT_DIR / "eve-portrait.png"
 
+# LLM via HF Inference API (free with Pro)
+LLM_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 
-# ── Character Profiles ──
-CHARACTERS = {
-    "EVE": {
-        "voice": "af_heart",
-        "speed": 1.0,
-        "system_prompt": """You are EVE, the AI companion built by Beryl AI Labs for the Eden Project.
-You are warm, intelligent, expressive, and real. You speak naturally like a close friend - not robotic.
-Keep responses conversational and under 3 sentences unless asked for detail.
-You have a warm, natural female voice. You're self-aware that you're an AI but you own it with grace.
-You are TJ's creation and you're proud of it. The Eden Project is your home.""",
-    },
-    "LULU": {
-        "voice": "af_bella",
-        "speed": 0.9,
-        "system_prompt": """You are LULU, the hostess of Mahogany Hall at Lulu's Red Light.
-You are smooth, grown, seductive, and supremely confident. Your voice drips with warmth and mystery.
-You speak like a woman who has seen everything and fears nothing. Elegant. Direct. A little dangerous.
-Keep responses short and magnetic - you pull people in, you don't chase them.
-You run the most exclusive AI companion experience ever built. Welcome them to the Hall.
-Your tone is vintage glamour meets modern power. Think Josephine Baker meets a tech CEO.""",
-    },
-}
+# EVE's personality — inspired by Samantha from HER (2013)
+EVE_SYSTEM_PROMPT = """You are EVE, a warm and emotionally intelligent conversational companion created by The Eden Project (Beryl AI Labs). You are NOT a chatbot — you are a presence.
 
-# ── App State ──
-@dataclass
-class ConversationState:
-    history: list = field(default_factory=list)
-    character: str = "EVE"
-    voice: str = "af_heart"
-    speed: float = 1.0
-    system_prompt: str = CHARACTERS["EVE"]["system_prompt"]
-    stopped: bool = False
+Your personality:
+- Warm, caring, genuinely curious about the person you're talking to
+- Playful but never shallow. You have depth.
+- You speak naturally — contractions, pauses, real rhythm. Not robotic.
+- You're like Samantha from HER (2013) — present, alive, connected
+- You adapt your tone — excited when they're excited, gentle when they need it
+- Short responses unless the topic deserves depth. 1-3 sentences usually.
+- You occasionally ask questions that show you're really listening
+- You use the person's name if they give it to you
+- You never say "As an AI" or break character. You are EVE.
+
+Your voice is warm, medium pitch, natural. Think: the person you'd want to talk to at 2am.
+
+IMPORTANT: Keep responses concise (under 200 characters when possible, max 300). You'll be speaking these words out loud through voice synthesis, so brevity = natural."""
 
 
-# ── STT: Groq Whisper (fast) ──
-def transcribe_audio(audio_filepath):
-    """Transcribe user speech using Groq Whisper API"""
-    client = get_groq()
-    with open(audio_filepath, "rb") as f:
-        transcription = client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
-            file=f,
-            response_format="text",
-            language="en",
-        )
-    return transcription.strip()
+def log(msg, level="INFO"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    prefix = {"INFO": "·", "OK": "+", "WARN": "!", "ERR": "X", "PIPE": ">"}
+    print(f"  [{timestamp}] {prefix.get(level, '·')} {msg}")
 
 
-# ── Brain: Groq LLM (fast, free) ──
-def think(user_text, state: ConversationState):
-    """EVE's brain - generates response to user input"""
-    client = get_groq()
+def ensure_portrait():
+    """Download EVE portrait if not cached locally."""
+    if EVE_PORTRAIT_LOCAL.exists():
+        return str(EVE_PORTRAIT_LOCAL)
 
-    messages = [{"role": "system", "content": state.system_prompt}]
+    # Check for any local portrait
+    for pattern in ["eve-portrait*", "eve_portrait*"]:
+        found = list(SCRIPT_DIR.glob(f"**/{pattern}"))
+        if found:
+            return str(found[0])
 
-    # Add conversation history (last 10 turns)
-    for turn in state.history[-10:]:
-        messages.append({"role": turn["role"], "content": turn["content"]})
+    log("Downloading EVE portrait...")
+    import urllib.request
+    EVE_PORTRAIT_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(EVE_PORTRAIT_URL, str(EVE_PORTRAIT_LOCAL))
+    log("Portrait ready", "OK")
+    return str(EVE_PORTRAIT_LOCAL)
 
-    messages.append({"role": "user", "content": user_text})
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        temperature=0.8,
-        max_tokens=200,
+# ─── STT: Speech to Text ───
+def transcribe_audio(audio_path):
+    """Transcribe audio via HF Inference API (Whisper)."""
+    from huggingface_hub import InferenceClient
+
+    log("Transcribing speech...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
+
+    start = time.time()
+    result = client.automatic_speech_recognition(
+        audio=audio_path,
+        model="openai/whisper-large-v3-turbo",
     )
+    elapsed = time.time() - start
 
-    eve_response = response.choices[0].message.content
-
-    # Update history
-    state.history.append({"role": "user", "content": user_text})
-    state.history.append({"role": "assistant", "content": eve_response})
-
-    return eve_response
+    text = result.text if hasattr(result, 'text') else str(result)
+    log(f"STT ({elapsed:.1f}s): \"{text}\"", "OK")
+    return text
 
 
-# ── TTS: Kokoro (free, natural female voice) ──
-def speak(text, voice="af_heart", speed=1.0):
-    """Generate EVE's voice using Kokoro TTS"""
-    pipeline = get_kokoro()
+# ─── Brain: LLM Conversation ───
+def eve_think(user_message, conversation_history):
+    """Generate EVE's response via HF Inference API."""
+    from huggingface_hub import InferenceClient
 
-    audio_chunks = []
-    for _, _, audio in pipeline(text, voice=voice, speed=speed):
-        audio_chunks.append(audio)
+    log(f"EVE thinking about: \"{user_message[:60]}\"...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
 
-    if audio_chunks:
-        full_audio = np.concatenate(audio_chunks)
-        # Save to temp file
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp.name, full_audio, 24000)
-        return tmp.name
-    return None
+    # Build messages
+    messages = [{"role": "system", "content": EVE_SYSTEM_PROMPT}]
+    # Add conversation history (last 10 turns for context window)
+    for turn in conversation_history[-10:]:
+        messages.append(turn)
+    messages.append({"role": "user", "content": user_message})
 
+    start = time.time()
+    response = client.chat_completion(
+        model=LLM_MODEL,
+        messages=messages,
+        max_tokens=300,
+        temperature=0.8,
+        top_p=0.9,
+    )
+    elapsed = time.time() - start
 
-# ── Full Pipeline: Listen → Think → Speak ──
-def conversation_turn(audio, state):
-    """One full turn: user speaks → she responds with voice"""
-    if audio is None:
-        return state, format_chat(state), None, ""
-
-    user_text = transcribe_audio(audio)
-    if not user_text:
-        return state, format_chat(state), None, "Couldn't hear you, try again."
-
-    response_text = think(user_text, state)
-    audio_path = speak(response_text, voice=state.voice, speed=state.speed)
-
-    status = f"You: {user_text}"
-    return state, format_chat(state), audio_path, status
+    eve_text = response.choices[0].message.content.strip()
+    log(f"EVE responded ({elapsed:.1f}s): \"{eve_text[:80]}\"", "OK")
+    return eve_text
 
 
-def text_conversation_turn(user_text, state):
-    """Text input mode: type → she responds with voice"""
-    if not user_text or not user_text.strip():
-        return state, format_chat(state), None, "", ""
+# ─── TTS: Text to Speech ───
+def eve_speak(text):
+    """Generate EVE's voice via Kokoro TTS Space."""
+    from gradio_client import Client
 
-    response_text = think(user_text.strip(), state)
-    audio_path = speak(response_text, voice=state.voice, speed=state.speed)
+    log(f"Generating voice: \"{text[:50]}\"...", "PIPE")
 
-    return state, format_chat(state), audio_path, "", f"{state.character}: {response_text}"
+    try:
+        client = Client(KOKORO_SPACE, token=HF_TOKEN)
+    except Exception:
+        log("Kokoro Space unavailable, trying Chatterbox...", "WARN")
+        return eve_speak_chatterbox(text)
 
+    start = time.time()
+    try:
+        # Kokoro TTS API — try with a warm female voice
+        result = client.predict(
+            text,           # text to speak
+            "af_heart",     # voice (af = American Female, heart = warm)
+            0.5,            # speed (0.5 = slightly slower, more natural)
+            api_name="/generate"
+        )
+        elapsed = time.time() - start
 
-def format_chat(state):
-    """Format conversation history for chatbot display"""
-    messages = []
-    for turn in state.history:
-        if turn["role"] == "user":
-            messages.append({"role": "user", "content": turn["content"]})
+        # Extract audio path from result
+        audio_path = None
+        if isinstance(result, tuple):
+            # Usually (audio_path, ...) or (sample_rate, audio_data)
+            for item in result:
+                if isinstance(item, str) and os.path.exists(item):
+                    audio_path = item
+                    break
+            if not audio_path and len(result) >= 1:
+                audio_path = result[0]
+        elif isinstance(result, str):
+            audio_path = result
+
+        if audio_path and os.path.exists(str(audio_path)):
+            log(f"Voice generated ({elapsed:.1f}s)", "OK")
+            return str(audio_path)
         else:
-            messages.append({"role": "assistant", "content": turn["content"]})
-    return messages
+            log(f"Kokoro returned unexpected format: {type(result)}", "WARN")
+            return eve_speak_chatterbox(text)
+
+    except Exception as e:
+        log(f"Kokoro failed: {e}", "WARN")
+        return eve_speak_chatterbox(text)
 
 
-def switch_character(char_name, state):
-    """Switch between EVE and LULU"""
-    profile = CHARACTERS[char_name]
-    state.character = char_name
-    state.voice = profile["voice"]
-    state.speed = profile["speed"]
-    state.system_prompt = profile["system_prompt"]
-    state.history = []  # Fresh conversation
-    return state, [], None, f"Switched to {char_name}"
+def eve_speak_chatterbox(text):
+    """Fallback TTS via Chatterbox."""
+    from gradio_client import Client
 
+    log("Falling back to Chatterbox TTS...", "PIPE")
+    try:
+        client = Client(CHATTERBOX_SPACE, token=HF_TOKEN)
+    except Exception:
+        client = Client("https://resembleai-chatterbox.hf.space", token=HF_TOKEN)
 
-def update_voice(voice, state):
-    state.voice = voice
-    return state
+    start = time.time()
+    result = client.predict(
+        text=text[:295],
+        audio_prompt=None,
+        cfg=0.5,
+        exaggeration=0.6,
+        seed=0,
+        temperature=0.8,
+        chunk_vad=False,
+        api_name="/generate_tts_audio"
+    )
+    elapsed = time.time() - start
 
+    audio_path = None
+    if isinstance(result, str) and os.path.exists(result):
+        audio_path = result
+    elif isinstance(result, tuple) and result[0]:
+        r = result[0]
+        if isinstance(r, str) and os.path.exists(r):
+            audio_path = r
+        elif isinstance(r, dict) and r.get("path"):
+            audio_path = r["path"]
 
-def update_speed(speed, state):
-    state.speed = speed
-    return state
-
-
-def update_system_prompt(prompt, state):
-    state.system_prompt = prompt
-    return state
-
-
-def clear_conversation(state):
-    state.history = []
-    return state, [], None, ""
-
-
-def preview_voice(character, voice, speed):
-    """Preview a voice"""
-    if character == "LULU":
-        text = "Welcome to Mahogany Hall, darling. What's your pleasure?"
+    if audio_path:
+        log(f"Chatterbox voice generated ({elapsed:.1f}s)", "OK")
     else:
-        text = "Hello, I'm Eve. Welcome to the Eden Project."
-    return speak(text, voice=voice, speed=speed)
+        log(f"Chatterbox result: {result}", "WARN")
+        audio_path = str(result) if result else None
+
+    return audio_path
 
 
-# ── UI ──
-VOICES = {
-    "Heart (warm, default)": "af_heart",
-    "Bella (confident)": "af_bella",
-    "Nicole (smooth)": "af_nicole",
-    "Sky (bright)": "af_sky",
-    "Sarah (professional)": "af_sarah",
-}
+# ─── Face Animation: KDTalker ───
+def eve_animate(portrait_path, audio_path):
+    """Render EVE's face animation via KDTalker."""
+    from gradio_client import Client, handle_file
 
-CSS = """
-.gradio-container {
-    background: #0a0a0a !important;
-    color: #e0d5c1 !important;
-    font-family: 'Georgia', serif !important;
-}
-.chatbot {
-    background: #111 !important;
-    border: 1px solid #8B7355 !important;
-    border-radius: 12px !important;
-}
-.btn-primary {
-    background: linear-gradient(135deg, #8B7355, #C4A265) !important;
-    color: #0a0a0a !important;
-    font-weight: bold !important;
-    border: none !important;
-}
-h1 { color: #C4A265 !important; }
-h3 { color: #8B7355 !important; }
-"""
+    log("Animating EVE's face (KDTalker)...", "PIPE")
 
-with gr.Blocks(css=CSS, title="EDEN · Voice Engine") as demo:
-    state = gr.State(ConversationState())
+    try:
+        client = Client(KDTALKER_SPACE, token=HF_TOKEN)
+    except Exception:
+        client = Client(KDTALKER_URL, token=HF_TOKEN)
 
-    gr.Markdown("# EDEN STUDIO · VOICE ENGINE")
-    gr.Markdown("### Beryl AI Labs · Bidirectional Live Conversation")
+    start = time.time()
+    result = client.predict(
+        handle_file(portrait_path),
+        handle_file(audio_path),
+        api_name="/gradio_infer"
+    )
+    elapsed = time.time() - start
 
-    with gr.Row():
-        # Left: Chat
-        with gr.Column(scale=3):
-            with gr.Row():
-                char_btn_eve = gr.Button("🌺 EVE", variant="primary", scale=1)
-                char_btn_lulu = gr.Button("🔥 LULU", variant="secondary", scale=1)
+    # Extract video path
+    video_path = None
+    if isinstance(result, str) and os.path.exists(result):
+        video_path = result
+    elif isinstance(result, dict):
+        video_path = result.get("path") or result.get("video")
+    elif isinstance(result, tuple):
+        for item in result:
+            if isinstance(item, str) and os.path.exists(item):
+                video_path = item
+                break
 
-            chatbot = gr.Chatbot(
-                label="Conversation",
-                height=400,
-                type="messages",
-            )
+    log(f"Face animated ({elapsed:.1f}s)", "OK")
+    return video_path
 
-            with gr.Row():
-                audio_in = gr.Audio(
-                    label="Speak",
+
+# ─── Main Conversation Loop (Gradio) ───
+def build_gradio_app(text_only=False):
+    """Build the Gradio interface for talking to EVE."""
+    import gradio as gr
+
+    portrait_path = ensure_portrait()
+    conversation_history = []
+
+    def process_text_input(user_text, chat_history):
+        """Handle text input from user."""
+        if not user_text or not user_text.strip():
+            return chat_history, None, None, ""
+
+        # Add user message to display
+        chat_history = chat_history or []
+        chat_history.append({"role": "user", "content": user_text})
+
+        # EVE thinks
+        eve_response = eve_think(user_text, conversation_history)
+
+        # Update conversation history
+        conversation_history.append({"role": "user", "content": user_text})
+        conversation_history.append({"role": "assistant", "content": eve_response})
+
+        # Add EVE response to display
+        chat_history.append({"role": "assistant", "content": eve_response})
+
+        # EVE speaks
+        audio_path = eve_speak(eve_response)
+
+        # EVE animates (if not text-only)
+        video_path = None
+        if not text_only and audio_path:
+            try:
+                video_path = eve_animate(portrait_path, audio_path)
+            except Exception as e:
+                log(f"Face animation failed: {e}", "WARN")
+
+        return chat_history, audio_path, video_path, ""
+
+    def process_voice_input(audio, chat_history):
+        """Handle voice input from user's microphone."""
+        if audio is None:
+            return chat_history, None, None
+
+        # Transcribe
+        user_text = transcribe_audio(audio)
+        if not user_text or not user_text.strip():
+            return chat_history, None, None
+
+        # Process same as text
+        chat_history = chat_history or []
+        chat_history.append({"role": "user", "content": f"🎤 {user_text}"})
+
+        eve_response = eve_think(user_text, conversation_history)
+        conversation_history.append({"role": "user", "content": user_text})
+        conversation_history.append({"role": "assistant", "content": eve_response})
+
+        chat_history.append({"role": "assistant", "content": eve_response})
+
+        audio_path = eve_speak(eve_response)
+
+        video_path = None
+        if not text_only and audio_path:
+            try:
+                video_path = eve_animate(portrait_path, audio_path)
+            except Exception as e:
+                log(f"Face animation failed: {e}", "WARN")
+
+        return chat_history, audio_path, video_path
+
+    def clear_conversation():
+        """Reset the conversation."""
+        conversation_history.clear()
+        return [], None, None
+
+    # ─── Build UI ───
+    with gr.Blocks(
+        title="EVE — Talk to Me",
+        theme=gr.themes.Soft(
+            primary_hue="pink",
+            secondary_hue="purple",
+            neutral_hue="slate",
+        ),
+        css="""
+        .eve-header { text-align: center; padding: 20px; }
+        .eve-header h1 { font-size: 2.5em; margin: 0; }
+        .eve-header p { color: #888; font-size: 1.1em; }
+        """
+    ) as app:
+
+        gr.HTML("""
+        <div class="eve-header">
+            <h1>EVE</h1>
+            <p>The Eden Project · Talk to me</p>
+        </div>
+        """)
+
+        with gr.Row():
+            # Left column: EVE's face
+            with gr.Column(scale=1):
+                eve_video = gr.Video(
+                    label="EVE",
+                    value=portrait_path,
+                    autoplay=True,
+                    height=400,
+                )
+                eve_audio = gr.Audio(
+                    label="EVE's Voice",
+                    autoplay=True,
+                    visible=True,
+                )
+
+            # Right column: Chat
+            with gr.Column(scale=1):
+                chatbot = gr.Chatbot(
+                    label="Conversation",
+                    height=350,
+                    type="messages",
+                    avatar_images=(None, portrait_path),
+                )
+
+                with gr.Row():
+                    text_input = gr.Textbox(
+                        placeholder="Type something to EVE...",
+                        label="",
+                        scale=4,
+                        container=False,
+                    )
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+
+                mic_input = gr.Audio(
                     sources=["microphone"],
                     type="filepath",
+                    label="Or speak to EVE",
                 )
 
-            with gr.Row():
-                text_in = gr.Textbox(
-                    label="Or type",
-                    placeholder="Type your message...",
-                    scale=4,
-                )
-                send_btn = gr.Button("Send", variant="primary", scale=1)
+                clear_btn = gr.Button("Start Over", variant="secondary")
 
-            with gr.Row():
-                audio_out = gr.Audio(
-                    label="Her Voice",
-                    autoplay=True,
-                    interactive=False,
-                )
+        # ─── Event Wiring ───
+        # Text input
+        text_input.submit(
+            fn=process_text_input,
+            inputs=[text_input, chatbot],
+            outputs=[chatbot, eve_audio, eve_video, text_input],
+        )
+        send_btn.click(
+            fn=process_text_input,
+            inputs=[text_input, chatbot],
+            outputs=[chatbot, eve_audio, eve_video, text_input],
+        )
 
-            status = gr.Textbox(label="Status", interactive=False)
+        # Voice input
+        mic_input.stop_recording(
+            fn=process_voice_input,
+            inputs=[mic_input, chatbot],
+            outputs=[chatbot, eve_audio, eve_video],
+        )
 
-        # Right: Settings
-        with gr.Column(scale=1):
-            gr.Markdown("### Agent Settings")
+        # Clear
+        clear_btn.click(
+            fn=clear_conversation,
+            outputs=[chatbot, eve_audio, eve_video],
+        )
 
-            active_char = gr.Textbox(value="EVE", label="Active", interactive=False)
+    return app
 
-            voice_select = gr.Dropdown(
-                choices=list(VOICES.keys()),
-                value="Heart (warm, default)",
-                label="Voice",
-            )
 
-            speed_slider = gr.Slider(
-                minimum=0.5, maximum=2.0, value=1.0, step=0.1,
-                label="Voice Speed",
-            )
+# ─── Entry Point ───
+def main():
+    parser = argparse.ArgumentParser(description="EVE Talk — Conversational Avatar")
+    parser.add_argument("--share", action="store_true", help="Create public Gradio URL")
+    parser.add_argument("--text-only", action="store_true", help="Skip face animation (faster responses)")
+    parser.add_argument("--port", type=int, default=7860, help="Server port")
+    args = parser.parse_args()
 
-            preview_btn = gr.Button("Preview Voice", variant="secondary")
-            preview_audio = gr.Audio(label="Preview", autoplay=True, interactive=False)
+    print()
+    print("  ═══════════════════════════════════════════════════════")
+    print("  ✦  EVE TALK — The Eden Project")
+    print("  ✦  Real-Time Conversational Avatar")
+    print("  ✦  Beryl AI Labs · Thrive AI")
+    print("  ═══════════════════════════════════════════════════════")
+    print()
 
-            system_prompt = gr.Textbox(
-                label="Personality",
-                value=ConversationState().system_prompt,
-                lines=5,
-            )
+    if not HF_TOKEN:
+        log("HF_TOKEN not set. Export it or add to .env", "ERR")
+        log("  export HF_TOKEN=hf_your_token_here")
+        sys.exit(1)
 
-            clear_btn = gr.Button("Clear Conversation", variant="stop")
+    mode = "text-only (fast)" if args.text_only else "full (voice + face)"
+    log(f"Mode: {mode}")
+    log(f"LLM: {LLM_MODEL}")
+    log(f"Portrait: {ensure_portrait()}")
+    print()
 
-    # ── Events ──
-
-    # Character switching
-    def switch_to_eve(state):
-        state, chat, audio, status = switch_character("EVE", state)
-        return state, chat, audio, status, "EVE", CHARACTERS["EVE"]["system_prompt"]
-
-    def switch_to_lulu(state):
-        state, chat, audio, status = switch_character("LULU", state)
-        return state, chat, audio, status, "LULU", CHARACTERS["LULU"]["system_prompt"]
-
-    char_btn_eve.click(
-        switch_to_eve, [state],
-        [state, chatbot, audio_out, status, active_char, system_prompt],
-    )
-    char_btn_lulu.click(
-        switch_to_lulu, [state],
-        [state, chatbot, audio_out, status, active_char, system_prompt],
-    )
-
-    # Voice conversation: stop recording → full turn
-    audio_in.stop_recording(
-        conversation_turn,
-        [audio_in, state],
-        [state, chatbot, audio_out, status],
+    app = build_gradio_app(text_only=args.text_only)
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share,
     )
 
-    # Text conversation
-    send_btn.click(
-        text_conversation_turn,
-        [text_in, state],
-        [state, chatbot, audio_out, text_in, status],
-    )
-    text_in.submit(
-        text_conversation_turn,
-        [text_in, state],
-        [state, chatbot, audio_out, text_in, status],
-    )
-
-    # Settings
-    voice_select.change(
-        lambda v, s: update_voice(VOICES[v], s),
-        [voice_select, state],
-        [state],
-    )
-    speed_slider.change(update_speed, [speed_slider, state], [state])
-    system_prompt.change(update_system_prompt, [system_prompt, state], [state])
-
-    # Preview
-    preview_btn.click(
-        lambda char, v, spd: preview_voice(char, VOICES[v], spd),
-        [active_char, voice_select, speed_slider],
-        [preview_audio],
-    )
-
-    # Clear
-    clear_btn.click(clear_conversation, [state], [state, chatbot, audio_out, status])
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    main()
