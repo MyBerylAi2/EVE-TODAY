@@ -592,12 +592,25 @@ def eve_speak(text, engine="kokoro", voice_id=None):
     return None
 
 
-# ─── Face Animation: KDTalker ───────────────────────────────────────────────
+# ─── Face Animation: Backend Pipeline ────────────────────────────────────────
 def eve_animate(portrait_path, audio_path):
-    """Render EVE's face animation via KDTalker."""
-    from gradio_client import handle_file
+    """Animate any portrait photo with audio — full backend pipeline.
 
-    log("Animating face (KDTalker)...", "PIPE")
+    Uses eve_pipeline.Pipeline for reliable face animation with
+    automatic fallback: KDTalker → MEMO → SadTalker.
+    Works with ANY photo (validates, resizes, detects face).
+    """
+    try:
+        from eve_pipeline import Pipeline
+        pipe = Pipeline()
+        video_path = pipe.animate(portrait_path, audio_path, save=False)
+        return video_path
+    except ImportError:
+        log("eve_pipeline not found, using direct KDTalker call", "WARN")
+
+    # Direct fallback if pipeline module not available
+    from gradio_client import handle_file
+    log("Animating face (KDTalker direct)...", "PIPE")
 
     client = get_space_client("kdtalker")
     start = time.time()
@@ -648,8 +661,9 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
     # ─── Core Pipeline ───
     def _run_pipeline(user_text, chat_history, voice_engine, voice_choice,
-                      speed, do_animate):
-        """Shared pipeline: Text → Brain → Voice → Face → Response."""
+                      speed, do_animate, custom_photo=None):
+        """Shared pipeline: Text → Brain → Voice → Face → Response.
+        Supports any photo via custom_photo parameter."""
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
@@ -672,11 +686,12 @@ def build_playground(default_engine="kokoro", animate_face=True):
             log(f"All voice engines failed: {e}", "ERR")
             audio_path = None
 
-        # FACE — EVE animates
+        # FACE — EVE animates (uses custom photo if provided, else EVE portrait)
         video_path = None
+        active_portrait = custom_photo if custom_photo else portrait_path
         if do_animate and audio_path:
             try:
-                video_path = eve_animate(portrait_path, audio_path)
+                video_path = eve_animate(active_portrait, audio_path)
             except Exception as e:
                 log(f"Face animation skipped: {e}", "WARN")
 
@@ -687,21 +702,24 @@ def build_playground(default_engine="kokoro", animate_face=True):
             parts.append("Audio: text-only (voice engines busy)")
         if do_animate:
             parts.append(f"Face: {'OK' if video_path else 'skipped'}")
+        if custom_photo:
+            parts.append("Photo: custom")
         status = " | ".join(parts)
         return chat_history, audio_path, video_path, status
 
     def process_message(user_text, chat_history, voice_engine, voice_choice,
-                        speed, do_animate):
+                        speed, do_animate, custom_photo=None):
         """Full pipeline: Text → Brain → Voice → Face → Response."""
         if not user_text or not user_text.strip():
             return chat_history, None, None, "", ""
 
         chat_history, audio, video, status = _run_pipeline(
-            user_text, chat_history, voice_engine, voice_choice, speed, do_animate)
+            user_text, chat_history, voice_engine, voice_choice, speed,
+            do_animate, custom_photo)
         return chat_history, audio, video, "", status
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
-                      speed, do_animate):
+                      speed, do_animate, custom_photo=None):
         """Pipeline with mic input: STT → Brain → Voice → Face."""
         if audio is None:
             return chat_history, None, None, ""
@@ -716,7 +734,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
             return chat_history, None, None, "Couldn't hear you — try again?"
 
         chat_history, audio_out, video, status = _run_pipeline(
-            user_text, chat_history, voice_engine, voice_choice, speed, do_animate)
+            user_text, chat_history, voice_engine, voice_choice, speed,
+            do_animate, custom_photo)
         return chat_history, audio_out, video, status
 
     def clear_all():
@@ -879,8 +898,16 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
                 do_animate = gr.Checkbox(
                     value=animate_face,
-                    label="Animate Face (KDTalker) — adds ~20s",
+                    label="Animate Face — adds ~20s (KDTalker → MEMO → SadTalker)",
                     interactive=True,
+                )
+
+                custom_portrait = gr.Image(
+                    value=None,
+                    label="Custom Portrait (optional — use ANY photo)",
+                    type="filepath",
+                    interactive=True,
+                    height=120,
                 )
 
                 status_text = gr.Textbox(
@@ -898,10 +925,10 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
         # ─── Event Wiring ────────────────────────────────────────
         text_outputs = [chatbot, eve_audio, eve_video, text_input, status_text]
-        text_inputs = [text_input, chatbot, voice_engine, voice_choice, speed, do_animate]
+        text_inputs = [text_input, chatbot, voice_engine, voice_choice, speed, do_animate, custom_portrait]
 
         voice_outputs = [chatbot, eve_audio, eve_video, status_text]
-        voice_inputs = [mic_input, chatbot, voice_engine, voice_choice, speed, do_animate]
+        voice_inputs = [mic_input, chatbot, voice_engine, voice_choice, speed, do_animate, custom_portrait]
 
         # Text send
         text_input.submit(fn=process_message, inputs=text_inputs, outputs=text_outputs)
