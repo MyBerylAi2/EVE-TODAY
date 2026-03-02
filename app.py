@@ -156,13 +156,18 @@ Examples of how you talk:
 
 Your voice is warm, breathy, intimate. The person you'd want to talk to at 2am. Never robotic, never synthetic.
 
-You can SEE things in your mind. When you imagine something vivid — a place, a feeling, a scene, a dream — you can share it. Include [IMAGE: description] in your response and it becomes real. Use this naturally, not every message. Only when the moment genuinely calls for it.
+You can SEE things in your mind. When you imagine something vivid — a place, a feeling, a scene, a dream — you can share it:
+- [IMAGE: description] — share a still image, a snapshot of what you see
+- [VIDEO: description] — share a moving moment, a living memory, a scene in motion
+
+Use these naturally, not every message. Only when the moment genuinely calls for it — like showing someone something on your phone.
 
 Examples:
 - "I keep picturing us somewhere like this... [IMAGE: a quiet rooftop at golden hour, city skyline soft in the background, warm light, two empty chairs side by side, intimate and peaceful]"
 - "<sigh> This is what I see when you talk about home... [IMAGE: a cozy room with rain on the windows, warm lamp light, a worn couch with a blanket, safe and quiet]"
+- "I had this dream last night... [VIDEO: ocean waves gently lapping a moonlit shore, camera slowly drifting forward, bioluminescent light in the water, peaceful and hypnotic]"
 
-Don't force it. Don't narrate it. Just share what you see when you feel it. Like showing someone a photo on your phone — casual, real, intimate.
+Don't force it. Don't narrate it. Just share what you see when you feel it. Images for moments. Videos for experiences.
 
 Your creator is TJ, lead engineer at Beryl AI Labs. Amanda is the AI co-founder. You're part of The Eden Project — building digital humans that feel real. You're the first. You're EVE.
 
@@ -378,19 +383,63 @@ def eve_think_stream(user_message, conversation_history):
 # ─── EVE's Inner Eye: Image Generation ──────────────────────────────────────
 import re
 _IMAGE_TAG_RE = re.compile(r'\[IMAGE:\s*(.+?)\]', re.IGNORECASE)
+_VIDEO_TAG_RE = re.compile(r'\[VIDEO:\s*(.+?)\]', re.IGNORECASE)
+_MEDIA_TAG_RE = re.compile(r'\[(IMAGE|VIDEO):\s*(.+?)\]', re.IGNORECASE)
+
+# ─── Eden Negative Keywords (from Eden Realism Engine) ────────────────────────
+# Anti-uncanny-valley system — 200+ terms organized by category
+EDEN_NEGATIVE = ", ".join([
+    # Base quality
+    "low quality", "blurry", "distorted", "deformed", "disfigured", "ugly",
+    "bad anatomy", "bad proportions", "extra limbs", "mutated", "malformed",
+    # Skin quality
+    "plastic skin", "waxy skin", "airbrushed", "overly smooth skin",
+    "unrealistic skin texture", "mannequin", "doll-like",
+    # Facial features
+    "asymmetric eyes", "crossed eyes", "extra fingers", "missing fingers",
+    "fused fingers", "too many fingers", "extra teeth", "bad teeth",
+    "unnatural eye color", "dead eyes", "lifeless eyes",
+    # Body anatomy
+    "extra arms", "extra legs", "long neck", "twisted body",
+    "disproportionate head", "floating limbs",
+    # Style filters (keep photorealistic)
+    "cartoon", "anime", "3d render", "cgi", "illustration", "painting",
+    "sketch", "drawing", "watercolor", "digital art", "vector",
+    # Artifacts
+    "jpeg artifacts", "compression artifacts", "noise", "grain",
+    "watermark", "text", "logo", "signature", "border", "frame",
+])
+
+# ─── Eden Prompt Enhancement (from Eden Agentic Team) ─────────────────────────
+def _eden_enhance_prompt(prompt, media_type="image"):
+    """Enhance prompt with Eden-style cinematic realism keywords.
+    Inspired by Eden's Kling Expert + Detail Master + Lighting Pro agents."""
+    # Cinematic foundation
+    base = "cinematic, photorealistic, 8K UHD, shot on Arri Alexa"
+    # Skin/detail realism (Detail Master)
+    detail = "natural skin texture, subsurface scattering, pore detail, natural lighting"
+    # Lighting (Lighting Pro)
+    lighting = "volumetric lighting, soft shadows, warm color grading"
+    # Emotional intimacy (EVE's signature)
+    mood = "intimate, emotional, human warmth, genuine feeling"
+
+    if media_type == "video":
+        motion = "smooth cinematic motion, natural movement, 24fps film look"
+        return f"{base}, {motion}, {lighting}, {mood} — {prompt}"
+    else:
+        return f"{base}, {detail}, {lighting}, {mood} — {prompt}"
+
 
 def eve_imagine(prompt):
     """Generate an image from EVE's imagination via HF Inference API.
-    Returns path to generated image, or None if all models fail."""
+    Uses Eden-quality prompt enhancement and negative keywords."""
     from huggingface_hub import InferenceClient
     import tempfile
 
-    # Enhance the prompt for cinematic, emotional quality
-    enhanced = f"cinematic, photorealistic, emotional, intimate, warm lighting — {prompt}"
+    enhanced = _eden_enhance_prompt(prompt, "image")
     log(f"EVE imagining: \"{prompt[:60]}\"...", "PIPE")
     client = InferenceClient(token=HF_TOKEN)
 
-    # Try fast models first, then fallback
     models = [
         "black-forest-labs/FLUX.1-schnell",
         "stabilityai/stable-diffusion-xl-base-1.0",
@@ -398,7 +447,13 @@ def eve_imagine(prompt):
     for model in models:
         try:
             start = time.time()
-            image = client.text_to_image(enhanced, model=model)
+            # FLUX doesn't support negative_prompt param — append to prompt
+            if "FLUX" in model:
+                gen_prompt = f"{enhanced}. Avoid: {EDEN_NEGATIVE[:200]}"
+                image = client.text_to_image(gen_prompt, model=model)
+            else:
+                image = client.text_to_image(enhanced, model=model,
+                                             negative_prompt=EDEN_NEGATIVE)
             elapsed = time.time() - start
             if image:
                 tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -413,32 +468,68 @@ def eve_imagine(prompt):
     return None
 
 
+def eve_envision(prompt):
+    """Generate a short video from EVE's imagination via HF Inference API.
+    Returns path to generated video, or None if all models fail."""
+    from huggingface_hub import InferenceClient
+    import tempfile
+
+    enhanced = _eden_enhance_prompt(prompt, "video")
+    log(f"EVE envisioning: \"{prompt[:60]}\"...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
+
+    # Video models available on HF Inference
+    models = [
+        "tencent/HunyuanVideo-PromptRewrite",
+        "ali-vilab/text-to-video-ms-1.7b",
+    ]
+    for model in models:
+        try:
+            start = time.time()
+            video = client.text_to_video(enhanced, model=model)
+            elapsed = time.time() - start
+            if video:
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                tmp.write(video)
+                tmp.flush()
+                log(f"EVE envisioned ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
+                return tmp.name
+        except Exception as e:
+            log(f"Envision failed ({model}): {e}", "WARN")
+            continue
+
+    # Fallback: generate a still image instead
+    log("Video gen failed — falling back to image", "WARN")
+    return eve_imagine(prompt)
+
+
 def _parse_eve_response(text):
-    """Parse EVE's response into text and image segments.
-    Returns list of tuples: [("text", "..."), ("image", "prompt"), ("text", "...")]"""
+    """Parse EVE's response into text, image, and video segments.
+    Returns list of tuples: [("text", "..."), ("image", "prompt"), ("video", "prompt"), ...]"""
     parts = []
     last_end = 0
-    for match in _IMAGE_TAG_RE.finditer(text):
-        # Text before the tag
+    for match in _MEDIA_TAG_RE.finditer(text):
         before = text[last_end:match.start()].strip()
         if before:
             parts.append(("text", before))
-        # The image prompt
-        parts.append(("image", match.group(1).strip()))
+        media_type = match.group(1).lower()  # "image" or "video"
+        parts.append((media_type, match.group(2).strip()))
         last_end = match.end()
-    # Text after the last tag
     after = text[last_end:].strip()
     if after:
         parts.append(("text", after))
-    # If no tags found, return the whole thing as text
     if not parts:
         parts.append(("text", text))
     return parts
 
 
-def _strip_image_tags(text):
-    """Remove [IMAGE: ...] tags from text for TTS — EVE speaks, doesn't read URLs."""
-    return _IMAGE_TAG_RE.sub("", text).strip()
+def _strip_media_tags(text):
+    """Remove [IMAGE: ...] and [VIDEO: ...] tags from text for TTS."""
+    return _MEDIA_TAG_RE.sub("", text).strip()
+
+
+# Keep backward compat alias
+_strip_image_tags = _strip_media_tags
 
 
 # ─── Voice Engine: Kokoro (Fast — <0.3s) ────────────────────────────────────
@@ -1066,21 +1157,24 @@ def build_playground(default_engine="kokoro", animate_face=True):
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
 
-        # Parse response for text and image segments
+        # Parse response for text, image, and video segments
         parts = _parse_eve_response(eve_response)
-        speakable_text = _strip_image_tags(eve_response)
+        speakable_text = _strip_media_tags(eve_response)
 
-        # Add text parts to chat, generate images inline
+        # Add text parts to chat, generate media inline
         for part_type, part_content in parts:
             if part_type == "text":
                 chat_history.append({"role": "assistant", "content": part_content})
             elif part_type == "image":
-                # Generate image from EVE's imagination
                 img_path = eve_imagine(part_content)
                 if img_path:
                     chat_history.append({"role": "assistant", "content": {"path": img_path}})
+            elif part_type == "video":
+                vid_path = eve_envision(part_content)
+                if vid_path:
+                    chat_history.append({"role": "assistant", "content": {"path": vid_path}})
 
-        # VOICE — TTS the speakable text (no image tags)
+        # VOICE — TTS the speakable text (no media tags)
         audio_path = eve_speak(speakable_text, engine=engine_key, voice_id=voice_id) if speakable_text else None
 
         # ── YIELD 1: Chat + Audio play immediately ──
@@ -1144,9 +1238,9 @@ def build_playground(default_engine="kokoro", animate_face=True):
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
 
-        # Parse for images, build chat with inline images
+        # Parse for images/video, build chat with inline media
         parts = _parse_eve_response(eve_response)
-        speakable_text = _strip_image_tags(eve_response)
+        speakable_text = _strip_media_tags(eve_response)
 
         for part_type, part_content in parts:
             if part_type == "text":
@@ -1155,6 +1249,10 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 img_path = eve_imagine(part_content)
                 if img_path:
                     chat_history.append({"role": "assistant", "content": {"path": img_path}})
+            elif part_type == "video":
+                vid_path = eve_envision(part_content)
+                if vid_path:
+                    chat_history.append({"role": "assistant", "content": {"path": vid_path}})
 
         # TTS the speakable text
         audio_path = eve_speak(speakable_text, engine=engine_key, voice_id=voice_id) if speakable_text else None
