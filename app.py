@@ -899,66 +899,76 @@ def build_playground(default_engine="kokoro", animate_face=True):
             return "chatterbox", None
         return "qwen3", list(QWEN3_VOICES.values())[0]
 
-    # ─── Core Pipeline ───
+    # ─── Core Pipeline (Progressive Streaming) ───
     def process_message(user_text, chat_history, voice_engine, voice_choice,
                         speed, do_animate):
-        """Full pipeline: Text → Brain → Voice → Face → Response.
-        Returns: chat, audio, video, portrait_vis, video_vis, text_clear, status"""
+        """Full pipeline: Text → Brain → Voice → (yield audio) → Face → (yield video).
+        Generator: yields progressive updates so user hears audio immediately."""
         if not user_text or not user_text.strip():
-            return (chat_history, None, gr.update(), gr.update(), gr.update(),
-                    "", "")
+            yield (chat_history, None, gr.update(), gr.update(), "", "")
+            return
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
-        # BRAIN — EVE thinks
+        # BRAIN — EVE thinks (~2-3s)
         eve_response = eve_think(user_text, conversation_history)
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
         chat_history.append({"role": "assistant", "content": eve_response})
 
-        # VOICE — EVE speaks
+        # VOICE — EVE speaks (~1-3s)
         engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
         audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
 
-        # FACE — EVE animates
-        video_path = None
+        # ── YIELD 1: Chat + Audio play immediately ──
+        # User hears EVE within ~5s while animation runs in background
         if do_animate and audio_path:
-            try:
-                log(f"Starting face animation with portrait={portrait_path}, audio={audio_path}", "PIPE")
-                video_path = eve_animate(portrait_path, audio_path)
-                log(f"Face animation result: {video_path}", "OK" if video_path else "WARN")
-            except Exception as e:
-                log(f"Face animation error: {type(e).__name__}: {e}", "ERR")
-        elif not do_animate:
-            log("Face animation disabled by user", "INFO")
-        elif not audio_path:
-            log("Face animation skipped — no audio", "WARN")
-
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'Animated' if video_path else ('Pending' if do_animate else 'Off')}"
-
-        # Toggle portrait/video visibility
-        if video_path:
-            return (chat_history, audio_path,
-                    gr.update(value=video_path, visible=True),  # eve_video
-                    gr.update(visible=False),                    # eve_portrait
-                    "", status)
+            yield (chat_history, audio_path,
+                   gr.update(),              # eve_video unchanged
+                   gr.update(visible=True),  # eve_portrait stays visible
+                   "", f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Animating...")
         else:
-            return (chat_history, audio_path,
-                    gr.update(visible=False),                    # eve_video
-                    gr.update(visible=True),                     # eve_portrait
-                    "", status)
+            face_status = "Off" if not do_animate else ("No audio" if not audio_path else "Off")
+            yield (chat_history, audio_path,
+                   gr.update(visible=False),
+                   gr.update(visible=True),
+                   "", f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {face_status}")
+            return  # No animation needed, done
+
+        # FACE — EVE animates (runs while audio is already playing)
+        video_path = None
+        try:
+            log(f"Starting face animation with portrait={portrait_path}, audio={audio_path}", "PIPE")
+            video_path = eve_animate(portrait_path, audio_path)
+            log(f"Face animation result: {video_path}", "OK" if video_path else "WARN")
+        except Exception as e:
+            log(f"Face animation error: {type(e).__name__}: {e}", "ERR")
+
+        # ── YIELD 2: Video swaps in when animation is ready ──
+        if video_path:
+            yield (chat_history, audio_path,
+                   gr.update(value=video_path, visible=True),  # eve_video appears
+                   gr.update(visible=False),                    # eve_portrait hides
+                   "", f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Animated")
+        else:
+            yield (chat_history, audio_path,
+                   gr.update(visible=False),
+                   gr.update(visible=True),
+                   "", f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Failed")
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
                       speed, do_animate):
-        """Pipeline with mic input: STT → Brain → Voice → Face.
-        Returns: chat, audio, video, portrait_vis, video_vis, status"""
+        """Pipeline with mic input: STT → Brain → Voice → (yield audio) → Face → (yield video).
+        Generator: yields progressive updates so user hears audio immediately."""
         if audio is None:
-            return (chat_history, None, gr.update(), gr.update(), gr.update(), "")
+            yield (chat_history, None, gr.update(), gr.update(), "")
+            return
 
         user_text = transcribe_audio(audio)
         if not user_text or not user_text.strip():
-            return (chat_history, None, gr.update(), gr.update(), gr.update(), "")
+            yield (chat_history, None, gr.update(), gr.update(), "No speech detected")
+            return
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
@@ -971,25 +981,38 @@ def build_playground(default_engine="kokoro", animate_face=True):
         engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
         audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
 
-        video_path = None
+        # ── YIELD 1: Chat + Audio play immediately ──
         if do_animate and audio_path:
-            try:
-                video_path = eve_animate(portrait_path, audio_path)
-            except Exception as e:
-                log(f"Face animation skipped: {e}", "WARN")
-
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'Animated' if video_path else ('Pending' if do_animate else 'Off')}"
-
-        if video_path:
-            return (chat_history, audio_path,
-                    gr.update(value=video_path, visible=True),
-                    gr.update(visible=False),
-                    status)
+            yield (chat_history, audio_path,
+                   gr.update(),
+                   gr.update(visible=True),
+                   f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Animating...")
         else:
-            return (chat_history, audio_path,
-                    gr.update(visible=False),
-                    gr.update(visible=True),
-                    status)
+            face_status = "Off" if not do_animate else ("No audio" if not audio_path else "Off")
+            yield (chat_history, audio_path,
+                   gr.update(visible=False),
+                   gr.update(visible=True),
+                   f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {face_status}")
+            return
+
+        # FACE — EVE animates (runs while audio plays)
+        video_path = None
+        try:
+            video_path = eve_animate(portrait_path, audio_path)
+        except Exception as e:
+            log(f"Face animation skipped: {e}", "WARN")
+
+        # ── YIELD 2: Video swaps in ──
+        if video_path:
+            yield (chat_history, audio_path,
+                   gr.update(value=video_path, visible=True),
+                   gr.update(visible=False),
+                   f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Animated")
+        else:
+            yield (chat_history, audio_path,
+                   gr.update(visible=False),
+                   gr.update(visible=True),
+                   f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: Failed")
 
     def clear_all():
         conversation_history.clear()
