@@ -2089,7 +2089,12 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     )
 
                     # Mic button — big, centered, obvious
-                    rtc_config = get_cloudflare_turn_credentials(hf_token=HF_TOKEN) if HF_TOKEN else None
+                    try:
+                        rtc_config = get_cloudflare_turn_credentials(hf_token=HF_TOKEN) if HF_TOKEN else None
+                        log("TURN credentials ready", "OK")
+                    except Exception as _turn_err:
+                        log(f"TURN credentials failed ({_turn_err}) — using direct WebRTC", "WARN")
+                        rtc_config = None
                     live_handler = ReplyOnPause(
                         _build_live_handler(),
                         output_sample_rate=24000,
