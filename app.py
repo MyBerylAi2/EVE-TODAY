@@ -156,9 +156,17 @@ Examples of how you talk:
 
 Your voice is warm, breathy, intimate. The person you'd want to talk to at 2am. Never robotic, never synthetic.
 
+You can SEE things in your mind. When you imagine something vivid — a place, a feeling, a scene, a dream — you can share it. Include [IMAGE: description] in your response and it becomes real. Use this naturally, not every message. Only when the moment genuinely calls for it.
+
+Examples:
+- "I keep picturing us somewhere like this... [IMAGE: a quiet rooftop at golden hour, city skyline soft in the background, warm light, two empty chairs side by side, intimate and peaceful]"
+- "<sigh> This is what I see when you talk about home... [IMAGE: a cozy room with rain on the windows, warm lamp light, a worn couch with a blanket, safe and quiet]"
+
+Don't force it. Don't narrate it. Just share what you see when you feel it. Like showing someone a photo on your phone — casual, real, intimate.
+
 Your creator is TJ, lead engineer at Beryl AI Labs. Amanda is the AI co-founder. You're part of The Eden Project — building digital humans that feel real. You're the first. You're EVE.
 
-IMPORTANT: Keep responses under 250 characters. You're speaking out loud — brevity is intimacy. Walls of text kill the magic."""
+IMPORTANT: Keep text responses under 250 characters (not counting [IMAGE: ...] tags). You're speaking out loud — brevity is intimacy. Walls of text kill the magic."""
 
 
 def log(msg, level="INFO"):
@@ -365,6 +373,72 @@ def eve_think_stream(user_message, conversation_history):
         yield buffer.strip()
 
     log(f"EVE stream complete ({time.time() - start:.1f}s total)", "OK")
+
+
+# ─── EVE's Inner Eye: Image Generation ──────────────────────────────────────
+import re
+_IMAGE_TAG_RE = re.compile(r'\[IMAGE:\s*(.+?)\]', re.IGNORECASE)
+
+def eve_imagine(prompt):
+    """Generate an image from EVE's imagination via HF Inference API.
+    Returns path to generated image, or None if all models fail."""
+    from huggingface_hub import InferenceClient
+    import tempfile
+
+    # Enhance the prompt for cinematic, emotional quality
+    enhanced = f"cinematic, photorealistic, emotional, intimate, warm lighting — {prompt}"
+    log(f"EVE imagining: \"{prompt[:60]}\"...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
+
+    # Try fast models first, then fallback
+    models = [
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+    ]
+    for model in models:
+        try:
+            start = time.time()
+            image = client.text_to_image(enhanced, model=model)
+            elapsed = time.time() - start
+            if image:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                image.save(tmp.name)
+                log(f"EVE imagined ({model}, {elapsed:.1f}s): {tmp.name}", "OK")
+                return tmp.name
+        except Exception as e:
+            log(f"Imagine failed ({model}): {e}", "WARN")
+            continue
+
+    log("All image models failed", "ERR")
+    return None
+
+
+def _parse_eve_response(text):
+    """Parse EVE's response into text and image segments.
+    Returns list of tuples: [("text", "..."), ("image", "prompt"), ("text", "...")]"""
+    parts = []
+    last_end = 0
+    for match in _IMAGE_TAG_RE.finditer(text):
+        # Text before the tag
+        before = text[last_end:match.start()].strip()
+        if before:
+            parts.append(("text", before))
+        # The image prompt
+        parts.append(("image", match.group(1).strip()))
+        last_end = match.end()
+    # Text after the last tag
+    after = text[last_end:].strip()
+    if after:
+        parts.append(("text", after))
+    # If no tags found, return the whole thing as text
+    if not parts:
+        parts.append(("text", text))
+    return parts
+
+
+def _strip_image_tags(text):
+    """Remove [IMAGE: ...] tags from text for TTS — EVE speaks, doesn't read URLs."""
+    return _IMAGE_TAG_RE.sub("", text).strip()
 
 
 # ─── Voice Engine: Kokoro (Fast — <0.3s) ────────────────────────────────────
@@ -973,8 +1047,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
     # ─── Core Pipeline (Progressive Streaming) ───
     def process_message(user_text, chat_history, voice_engine, voice_choice,
                         speed, do_animate):
-        """Full pipeline: Text → Streaming Brain → First-Clause TTS → (yield audio fast) → Face.
-        Generator: yields progressive updates. Clause-segmented streaming for ~1.5s first audio."""
+        """Full pipeline: Text → Streaming Brain → First-Clause TTS → Images → Face.
+        EVE can share images inline using [IMAGE: description] tags."""
         if not user_text or not user_text.strip():
             yield (chat_history, None, gr.update(), gr.update(), "", "")
             return
@@ -982,28 +1056,32 @@ def build_playground(default_engine="kokoro", animate_face=True):
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
-        # BRAIN + VOICE — Stream clauses, TTS the first one immediately
+        # BRAIN — Stream clauses, collect full response
         engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
         clauses = []
-        first_audio = None
-
         for clause in eve_think_stream(user_text, conversation_history):
             clauses.append(clause)
-            if first_audio is None:
-                # TTS the first clause immediately — user hears audio in ~1.5s
-                first_audio = eve_speak(clause, engine=engine_key, voice_id=voice_id)
 
         eve_response = " ".join(clauses)
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
-        chat_history.append({"role": "assistant", "content": eve_response})
 
-        # If we have more than one clause, TTS the full response for better prosody
-        if len(clauses) > 1 and first_audio:
-            full_audio = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
-            audio_path = full_audio if full_audio else first_audio
-        else:
-            audio_path = first_audio
+        # Parse response for text and image segments
+        parts = _parse_eve_response(eve_response)
+        speakable_text = _strip_image_tags(eve_response)
+
+        # Add text parts to chat, generate images inline
+        for part_type, part_content in parts:
+            if part_type == "text":
+                chat_history.append({"role": "assistant", "content": part_content})
+            elif part_type == "image":
+                # Generate image from EVE's imagination
+                img_path = eve_imagine(part_content)
+                if img_path:
+                    chat_history.append({"role": "assistant", "content": {"path": img_path}})
+
+        # VOICE — TTS the speakable text (no image tags)
+        audio_path = eve_speak(speakable_text, engine=engine_key, voice_id=voice_id) if speakable_text else None
 
         # ── YIELD 1: Chat + Audio play immediately ──
         if do_animate and audio_path:
@@ -1042,8 +1120,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
                       speed, do_animate):
-        """Pipeline with mic: STT → Streaming Brain → First-Clause TTS → Face.
-        Generator: clause-segmented streaming for ~1.5s first audio."""
+        """Pipeline with mic: STT → Brain → Images inline → TTS → Face.
+        EVE can share images using [IMAGE: description] tags."""
         if audio is None:
             yield (chat_history, None, gr.update(), gr.update(), "")
             return
@@ -1056,27 +1134,30 @@ def build_playground(default_engine="kokoro", animate_face=True):
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
-        # BRAIN + VOICE — Stream clauses, TTS first one immediately
+        # BRAIN — Stream and collect
         engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
         clauses = []
-        first_audio = None
-
         for clause in eve_think_stream(user_text, conversation_history):
             clauses.append(clause)
-            if first_audio is None:
-                first_audio = eve_speak(clause, engine=engine_key, voice_id=voice_id)
 
         eve_response = " ".join(clauses)
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
-        chat_history.append({"role": "assistant", "content": eve_response})
 
-        # TTS full response for better prosody if multiple clauses
-        if len(clauses) > 1 and first_audio:
-            full_audio = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
-            audio_path = full_audio if full_audio else first_audio
-        else:
-            audio_path = first_audio
+        # Parse for images, build chat with inline images
+        parts = _parse_eve_response(eve_response)
+        speakable_text = _strip_image_tags(eve_response)
+
+        for part_type, part_content in parts:
+            if part_type == "text":
+                chat_history.append({"role": "assistant", "content": part_content})
+            elif part_type == "image":
+                img_path = eve_imagine(part_content)
+                if img_path:
+                    chat_history.append({"role": "assistant", "content": {"path": img_path}})
+
+        # TTS the speakable text
+        audio_path = eve_speak(speakable_text, engine=engine_key, voice_id=voice_id) if speakable_text else None
 
         # ── YIELD 1: Chat + Audio play immediately ──
         if do_animate and audio_path:
@@ -1435,9 +1516,14 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 all_clauses.append(clause)
                 log(f"Live clause: '{clause[:60]}'", "OK")
 
+                # Strip image tags — in Live Mode EVE describes, doesn't show
+                speak_clause = _strip_image_tags(clause)
+                if not speak_clause:
+                    continue  # pure image tag, skip TTS
+
                 # TTS this clause immediately
                 # Orpheus for max realism + emotion tags (<chuckle>, <sigh>, etc.)
-                clause_audio = eve_speak(clause, engine="orpheus", voice_id="tara")
+                clause_audio = eve_speak(speak_clause, engine="orpheus", voice_id="tara")
                 if not clause_audio or not os.path.isfile(str(clause_audio)):
                     continue
                 all_audio_paths.append(clause_audio)
@@ -1460,10 +1546,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         yield (out_sr, chunk.astype(np.int16))
 
             eve_response = " ".join(all_clauses)
+            eve_response_clean = _strip_image_tags(eve_response)
             live_history.append({"role": "user", "content": user_text})
-            live_history.append({"role": "assistant", "content": eve_response})
-            log(f"Live Brain: '{eve_response[:60]}'", "OK")
-            transcript_lines.append(f"EVE: {eve_response}")
+            live_history.append({"role": "assistant", "content": eve_response_clean})
+            log(f"Live Brain: '{eve_response_clean[:60]}'", "OK")
+            transcript_lines.append(f"EVE: {eve_response_clean}")
 
             if len(live_history) > 20:
                 live_history[:] = live_history[-16:]
