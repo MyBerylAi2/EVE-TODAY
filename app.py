@@ -577,36 +577,51 @@ def eve_speak(text, engine="kokoro", voice_id=None):
     return None
 
 
-# ─── Face Animation: KDTalker ───────────────────────────────────────────────
+# ─── Face Animation: KDTalker (with backup chain) ───────────────────────────
 def eve_animate(portrait_path, audio_path):
-    """Render EVE's face animation via KDTalker."""
-    from gradio_client import handle_file
+    """Render EVE's face animation. Cascades through ANIMATION_SPACES backups."""
+    from gradio_client import Client, handle_file
 
-    log("Animating face (KDTalker)...", "PIPE")
+    log("Animating face...", "PIPE")
 
-    client = get_space_client("kdtalker")
-    start = time.time()
+    for space_cfg in ANIMATION_SPACES:
+        try:
+            log(f"Trying {space_cfg['name']}...", "PIPE")
+            try:
+                client = Client(space_cfg["name"], token=HF_TOKEN)
+            except Exception:
+                if space_cfg.get("url"):
+                    client = Client(space_cfg["url"], token=HF_TOKEN)
+                else:
+                    raise
 
-    result = client.predict(
-        handle_file(portrait_path),
-        handle_file(audio_path),
-        api_name="/gradio_infer"
-    )
-    elapsed = time.time() - start
+            start = time.time()
+            result = client.predict(
+                handle_file(portrait_path),
+                handle_file(audio_path),
+                api_name=space_cfg["api"],
+            )
+            elapsed = time.time() - start
 
-    video_path = None
-    if isinstance(result, str) and os.path.exists(result):
-        video_path = result
-    elif isinstance(result, dict):
-        video_path = result.get("path") or result.get("video")
-    elif isinstance(result, tuple):
-        for item in result:
-            if isinstance(item, str) and os.path.exists(item):
-                video_path = item
-                break
+            video_path = None
+            if isinstance(result, str) and os.path.exists(result):
+                video_path = result
+            elif isinstance(result, dict):
+                video_path = result.get("path") or result.get("video")
+            elif isinstance(result, tuple):
+                for item in result:
+                    if isinstance(item, str) and os.path.exists(item):
+                        video_path = item
+                        break
 
-    log(f"Face animated ({elapsed:.1f}s)", "OK")
-    return video_path
+            if video_path:
+                log(f"Face animated via {space_cfg['name']} ({elapsed:.1f}s)", "OK")
+                return video_path
+        except Exception as e:
+            log(f"{space_cfg['name']} failed: {e}", "WARN")
+
+    log("All animation spaces failed", "ERR")
+    return None
 
 
 # ─── 2D to 4D Pipeline Agents ────────────────────────────────────────────────
@@ -718,9 +733,7 @@ def agent_realism(portrait_path, depth_map_path):
 
 
 def agent_animate_4d(enhanced_portrait_path):
-    """Animation Agent: animate face via ANIMATION_SPACES backup chain."""
-    from gradio_client import Client, handle_file
-
+    """Animation Agent: generate intro voice + animate face via eve_animate (has backup chain)."""
     log("Animation Agent preparing 4D face animation...", "PIPE")
 
     # Generate a short intro audio for the animation
@@ -734,45 +747,12 @@ def agent_animate_4d(enhanced_portrait_path):
         log("Animation Agent: no voice engine available for intro", "ERR")
         return None
 
-    # Try each animation space in the backup chain
-    for space_cfg in ANIMATION_SPACES:
-        try:
-            log(f"Animation Agent trying {space_cfg['name']}...", "PIPE")
-            try:
-                client = Client(space_cfg["name"], token=HF_TOKEN)
-            except Exception:
-                if space_cfg.get("url"):
-                    client = Client(space_cfg["url"], token=HF_TOKEN)
-                else:
-                    raise
-
-            start = time.time()
-            result = client.predict(
-                handle_file(enhanced_portrait_path),
-                handle_file(audio_path),
-                api_name=space_cfg["api"],
-            )
-            elapsed = time.time() - start
-
-            video_path = None
-            if isinstance(result, str) and os.path.exists(result):
-                video_path = result
-            elif isinstance(result, dict):
-                video_path = result.get("path") or result.get("video")
-            elif isinstance(result, tuple):
-                for item in result:
-                    if isinstance(item, str) and os.path.exists(item):
-                        video_path = item
-                        break
-
-            if video_path:
-                log(f"Animation Agent complete via {space_cfg['name']} ({elapsed:.1f}s)", "OK")
-                return video_path
-        except Exception as e:
-            log(f"Animation Agent {space_cfg['name']} failed: {e}", "WARN")
-
-    log("Animation Agent: all animation spaces failed", "ERR")
-    return None
+    video_path = eve_animate(enhanced_portrait_path, audio_path)
+    if video_path:
+        log("Animation Agent complete -> 4D video ready", "OK")
+    else:
+        log("Animation Agent: animation failed", "ERR")
+    return video_path
 
 
 def pipeline_2d_to_4d(portrait_path, progress_callback=None):
