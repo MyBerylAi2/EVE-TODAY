@@ -841,9 +841,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
     # ─── Core Pipeline ───
     def process_message(user_text, chat_history, voice_engine, voice_choice,
                         speed, do_animate):
-        """Full pipeline: Text → Brain → Voice → Face → Response."""
+        """Full pipeline: Text → Brain → Voice → Face → Response.
+        Returns: chat, audio, video, portrait_vis, video_vis, text_clear, status"""
         if not user_text or not user_text.strip():
-            return chat_history, None, None, "", ""
+            return (chat_history, None, gr.update(), gr.update(), gr.update(),
+                    "", "")
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
@@ -867,17 +869,29 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 log(f"Face animation skipped: {e}", "WARN")
 
         status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
-        return chat_history, audio_path, video_path, "", status
+
+        # Toggle portrait/video visibility
+        if video_path:
+            return (chat_history, audio_path,
+                    gr.update(value=video_path, visible=True),  # eve_video
+                    gr.update(visible=False),                    # eve_portrait
+                    "", status)
+        else:
+            return (chat_history, audio_path,
+                    gr.update(visible=False),                    # eve_video
+                    gr.update(visible=True),                     # eve_portrait
+                    "", status)
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
                       speed, do_animate):
-        """Pipeline with mic input: STT → Brain → Voice → Face."""
+        """Pipeline with mic input: STT → Brain → Voice → Face.
+        Returns: chat, audio, video, portrait_vis, video_vis, status"""
         if audio is None:
-            return chat_history, None, None, ""
+            return (chat_history, None, gr.update(), gr.update(), gr.update(), "")
 
         user_text = transcribe_audio(audio)
         if not user_text or not user_text.strip():
-            return chat_history, None, None, ""
+            return (chat_history, None, gr.update(), gr.update(), gr.update(), "")
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
@@ -898,11 +912,24 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 log(f"Face animation skipped: {e}", "WARN")
 
         status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
-        return chat_history, audio_path, video_path, status
+
+        if video_path:
+            return (chat_history, audio_path,
+                    gr.update(value=video_path, visible=True),
+                    gr.update(visible=False),
+                    status)
+        else:
+            return (chat_history, audio_path,
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    status)
 
     def clear_all():
         conversation_history.clear()
-        return [], None, None, "Ready. Say something."
+        return ([], None,
+                gr.update(visible=False),   # eve_video
+                gr.update(visible=True),    # eve_portrait
+                "Ready. Say something.")
 
     def update_voice_choices(engine):
         if engine == "Qwen3 (Design)":
@@ -1135,25 +1162,18 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 eve_vid_update,  # eve_video with 4D result
             )
 
-        # ─── Show video when available, portrait when not ────────
-        def show_video(video_path):
-            if video_path and os.path.exists(str(video_path)):
-                return gr.update(visible=False), gr.update(value=video_path, visible=True)
-            return gr.update(visible=True), gr.update(visible=False)
-
         # ─── Event Wiring ────────────────────────────────────────
-        text_outputs = [chatbot, eve_audio, eve_video, text_input, status_text]
+        # process_message returns: chat, audio, video_update, portrait_update, text_clear, status
+        text_outputs = [chatbot, eve_audio, eve_video, eve_portrait, text_input, status_text]
         text_inputs = [text_input, chatbot, voice_engine, voice_choice, speed, do_animate]
 
-        voice_outputs = [chatbot, eve_audio, eve_video, status_text]
+        # process_voice returns: chat, audio, video_update, portrait_update, status
+        voice_outputs = [chatbot, eve_audio, eve_video, eve_portrait, status_text]
         voice_inputs = [mic_input, chatbot, voice_engine, voice_choice, speed, do_animate]
 
         # Text send
         text_input.submit(fn=process_message, inputs=text_inputs, outputs=text_outputs)
         send_btn.click(fn=process_message, inputs=text_inputs, outputs=text_outputs)
-
-        # After text response, toggle portrait/video
-        eve_video.change(fn=show_video, inputs=[eve_video], outputs=[eve_portrait, eve_video])
 
         # Voice input
         mic_input.stop_recording(fn=process_voice, inputs=voice_inputs, outputs=voice_outputs)
@@ -1161,8 +1181,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
         # Voice engine switch → update voice dropdown
         voice_engine.change(fn=update_voice_choices, inputs=[voice_engine], outputs=[voice_choice])
 
-        # Clear
-        clear_btn.click(fn=clear_all, outputs=[chatbot, eve_audio, eve_video, status_text])
+        # Clear — returns: chat, audio, video_update, portrait_update, status
+        clear_btn.click(fn=clear_all, outputs=[chatbot, eve_audio, eve_video, eve_portrait, status_text])
 
         # Portrait upload → update main display
         portrait_upload.change(
