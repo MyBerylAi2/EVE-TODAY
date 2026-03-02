@@ -595,7 +595,7 @@ def build_playground(default_engine="kokoro", animate_face=True):
                         speed, do_animate):
         """Full pipeline: Text → Brain → Voice → Face → Response."""
         if not user_text or not user_text.strip():
-            return chat_history, None, None, "", gr.update()
+            return chat_history, None, None, "", ""
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
@@ -625,11 +625,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
                       speed, do_animate):
         """Pipeline with mic input: STT → Brain → Voice → Face."""
         if audio is None:
-            return chat_history, None, None, gr.update()
+            return chat_history, None, None, ""
 
         user_text = transcribe_audio(audio)
         if not user_text or not user_text.strip():
-            return chat_history, None, None, gr.update()
+            return chat_history, None, None, ""
 
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
@@ -658,61 +658,43 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
     def update_voice_choices(engine):
         if engine == "Qwen3 (Design)":
-            return gr.update(choices=list(QWEN3_VOICES.keys()), value="EVE Warm", visible=True)
+            return gr.Dropdown(choices=list(QWEN3_VOICES.keys()), value="EVE Warm", visible=True)
         elif engine == "Kokoro (Fast)":
-            return gr.update(choices=list(KOKORO_VOICES.keys()), value="Heart (Warm)", visible=True)
+            return gr.Dropdown(choices=list(KOKORO_VOICES.keys()), value="Heart (Warm)", visible=True)
         elif engine == "Orpheus (Human)":
-            return gr.update(choices=list(ORPHEUS_VOICES.keys()), value="Tara (Conversational)", visible=True)
+            return gr.Dropdown(choices=list(ORPHEUS_VOICES.keys()), value="Tara (Conversational)", visible=True)
         else:
-            return gr.update(choices=["Default"], value="Default", visible=False)
+            return gr.Dropdown(choices=["Default"], value="Default", visible=False)
 
     # ─── UI ──────────────────────────────────────────────────────────────
-    with gr.Blocks(
-        title="EVE Playground — The Eden Project",
-        theme=gr.themes.Soft(
-            primary_hue="pink",
-            secondary_hue="purple",
-            neutral_hue="slate",
-            font=gr.themes.GoogleFont("Inter"),
-        ),
-        css="""
-        /* Full-height playground */
-        .gradio-container { max-width: 1400px !important; }
+    # Gradio 6 moved theme/css to launch(), Gradio 5 uses Blocks constructor
+    _blocks_kwargs = {"title": "EVE Playground — The Eden Project"}
+    _launch_kwargs = {}
 
-        .eve-banner {
-            text-align: center;
-            padding: 16px 0 8px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-        }
-        .eve-banner h1 {
-            font-size: 2.8em;
-            font-weight: 300;
-            letter-spacing: 0.3em;
-            margin: 0;
-            background: linear-gradient(135deg, #ff6b9d, #c44dff, #ff6b9d);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .eve-banner p {
-            color: #666;
-            font-size: 0.95em;
-            margin: 4px 0 0 0;
-            letter-spacing: 0.15em;
-        }
+    _theme = gr.themes.Soft(
+        primary_hue="pink",
+        secondary_hue="purple",
+        neutral_hue="slate",
+    )
+    _css = """
+    .gradio-container { max-width: 1400px !important; }
+    .eve-banner { text-align: center; padding: 16px 0 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .eve-banner h1 { font-size: 2.8em; font-weight: 300; letter-spacing: 0.3em; margin: 0;
+        background: linear-gradient(135deg, #ff6b9d, #c44dff, #ff6b9d);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .eve-banner p { color: #666; font-size: 0.95em; margin: 4px 0 0 0; letter-spacing: 0.15em; }
+    .chat-panel .chatbot { min-height: 500px !important; }
+    """
 
-        /* Chat styling */
-        .chat-panel .chatbot { min-height: 500px !important; }
+    _gradio_major = int(gr.__version__.split(".")[0])
+    if _gradio_major >= 6:
+        _launch_kwargs["theme"] = _theme
+        _launch_kwargs["css"] = _css
+    else:
+        _blocks_kwargs["theme"] = _theme
+        _blocks_kwargs["css"] = _css
 
-        /* Status bar */
-        .status-bar {
-            font-size: 0.8em;
-            color: #888;
-            text-align: center;
-            padding: 8px;
-            border-top: 1px solid rgba(255,255,255,0.05);
-        }
-        """
-    ) as app:
+    with gr.Blocks(**_blocks_kwargs) as app:
 
         # ─── Header ─────────────────────────────────────────────────
         gr.HTML("""
@@ -727,14 +709,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
             # ═══ LEFT: Chat Panel ═══════════════════════════════════
             with gr.Column(scale=3, elem_classes="chat-panel"):
 
-                chatbot = gr.Chatbot(
-                    label="",
-                    height=500,
-                    type="messages",
-                    avatar_images=(None, portrait_path),
-                    show_label=False,
-                    placeholder="Say something. I'm here.",
-                )
+                _chatbot_kwargs = {
+                    "label": "",
+                    "height": 500,
+                    "show_label": False,
+                }
+                # Gradio 5 uses type="messages", Gradio 6 removed it
+                if _gradio_major < 6:
+                    _chatbot_kwargs["type"] = "messages"
+                    _chatbot_kwargs["avatar_images"] = (None, portrait_path)
+                    _chatbot_kwargs["placeholder"] = "Say something. I'm here."
+                chatbot = gr.Chatbot(**_chatbot_kwargs)
 
                 with gr.Row():
                     text_input = gr.Textbox(
@@ -769,14 +754,16 @@ def build_playground(default_engine="kokoro", animate_face=True):
             with gr.Column(scale=2):
 
                 # EVE's face / video
-                eve_portrait = gr.Image(
+                _img_kwargs = dict(
                     value=portrait_path,
                     label="",
                     show_label=False,
                     height=360,
-                    show_download_button=False,
                     interactive=False,
                 )
+                if _gradio_major < 6:
+                    _img_kwargs["show_download_button"] = False
+                eve_portrait = gr.Image(**_img_kwargs)
                 eve_video = gr.Video(
                     label="EVE Speaking",
                     autoplay=True,
@@ -839,8 +826,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
         # ─── Show video when available, portrait when not ────────
         def show_video(video_path):
             if video_path and os.path.exists(str(video_path)):
-                return gr.update(visible=False), gr.update(value=video_path, visible=True)
-            return gr.update(visible=True), gr.update(visible=False)
+                return gr.Image(visible=False), gr.Video(value=video_path, visible=True)
+            return gr.Image(visible=True), gr.Video(visible=False)
 
         # ─── Event Wiring ────────────────────────────────────────
         text_outputs = [chatbot, eve_audio, eve_video, text_input, status_text]
@@ -865,6 +852,8 @@ def build_playground(default_engine="kokoro", animate_face=True):
         # Clear
         clear_btn.click(fn=clear_all, outputs=[chatbot, eve_audio, eve_video, status_text])
 
+    # Store Gradio 6 launch kwargs for theme/css
+    app._eve_launch_kwargs = _launch_kwargs
     return app
 
 
@@ -914,10 +903,12 @@ def main():
         default_engine=args.voice,
         animate_face=not args.text_only,
     )
+    launch_kwargs = getattr(app, '_eve_launch_kwargs', {})
     app.launch(
         server_name="0.0.0.0",
         server_port=args.port,
         share=args.share,
+        **launch_kwargs,
     )
 
 
