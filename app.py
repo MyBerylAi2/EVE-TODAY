@@ -154,37 +154,60 @@ def ensure_portrait():
 
 
 # ─── Gradio Client Helper ───────────────────────────────────────────────────
-def get_space_client(space_key):
-    """Connect to a HF Space with fallback to direct URL."""
+_space_clients = {}  # Cache — avoid reconnecting every call
+
+
+def get_space_client(space_key, max_retries=2):
+    """Connect to a HF Space with retry for sleeping Spaces."""
+    if space_key in _space_clients:
+        return _space_clients[space_key]
+
     from gradio_client import Client
 
     space = SPACES[space_key]
-    try:
-        return Client(space["name"], token=HF_TOKEN)
-    except Exception:
-        if "url" in space:
-            log(f"{space_key} name lookup failed, trying direct URL...", "WARN")
-            return Client(space["url"], token=HF_TOKEN)
-        raise
+    last_err = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            c = Client(space["name"], token=HF_TOKEN)
+            _space_clients[space_key] = c
+            return c
+        except Exception as e:
+            last_err = e
+            if "url" in space:
+                try:
+                    c = Client(space["url"], token=HF_TOKEN)
+                    _space_clients[space_key] = c
+                    return c
+                except Exception:
+                    pass
+            if attempt < max_retries:
+                wait = 3 * (attempt + 1)
+                log(f"{space_key} Space may be sleeping, retry in {wait}s...", "WARN")
+                time.sleep(wait)
+
+    raise ConnectionError(f"{space_key} Space unreachable after {max_retries + 1} tries: {last_err}")
 
 
 def extract_audio_path(result):
     """Extract audio file path from various Gradio return formats."""
+    # Direct file path
     if isinstance(result, str) and os.path.exists(result):
         return result
+    # GradioFileData or dict with path/url
+    if hasattr(result, "path"):
+        return str(result.path) if os.path.exists(str(result.path)) else None
     if isinstance(result, dict):
-        p = result.get("path") or result.get("audio")
+        p = result.get("path") or result.get("audio") or result.get("url")
         if p and os.path.exists(str(p)):
             return str(p)
-    if isinstance(result, tuple):
+    # Tuple/list of results
+    if isinstance(result, (tuple, list)):
         for item in result:
-            if isinstance(item, str) and os.path.exists(item):
-                return item
-            if isinstance(item, dict):
-                p = item.get("path") or item.get("audio")
-                if p and os.path.exists(str(p)):
-                    return str(p)
-        # Some Spaces return (filepath, metadata)
+            found = extract_audio_path(item)
+            if found:
+                return found
+        # Last resort — first string element
         if len(result) >= 1 and isinstance(result[0], str):
             return result[0]
     return None
@@ -199,10 +222,18 @@ def transcribe_audio(audio_path):
     client = InferenceClient(token=HF_TOKEN)
 
     start = time.time()
-    result = client.automatic_speech_recognition(
-        audio=audio_path,
-        model="openai/whisper-large-v3-turbo",
-    )
+    try:
+        result = client.automatic_speech_recognition(
+            audio=audio_path,
+            model="openai/whisper-large-v3-turbo",
+        )
+    except Exception:
+        # Fallback model
+        log("Whisper turbo unavailable, trying base...", "WARN")
+        result = client.automatic_speech_recognition(
+            audio=audio_path,
+            model="openai/whisper-large-v3",
+        )
     elapsed = time.time() - start
 
     text = result.text if hasattr(result, "text") else str(result)
@@ -275,13 +306,14 @@ def voice_kokoro(text, voice_id="af_heart", speed=0.9):
         client = get_space_client("kokoro")
         start = time.time()
 
-        # Try different api_name patterns
-        for api_name in ["/generate_all", "/generate", "/generate_speech", None]:
+        # Confirmed endpoint: /generate_all with (text, voice, speed, use_gpu)
+        # Also try /predict as fallback (Arena API)
+        for api_name, args in [
+            ("/generate_all", (text, voice_id, speed, False)),
+            ("/predict", (text, voice_id, speed)),
+        ]:
             try:
-                if api_name:
-                    result = client.predict(text, voice_id, speed, api_name=api_name)
-                else:
-                    result = client.predict(text, voice_id, speed)
+                result = client.predict(*args, api_name=api_name)
                 elapsed = time.time() - start
                 audio = extract_audio_path(result)
                 if audio:
@@ -482,22 +514,38 @@ def voice_chatterbox(text):
     client = get_space_client("chatterbox")
     start = time.time()
 
-    result = client.predict(
-        text=text[:295],
-        audio_prompt=None,
-        cfg=0.5,
-        exaggeration=0.6,
-        seed=0,
-        temperature=0.8,
-        chunk_vad=False,
-        api_name="/generate_tts_audio"
-    )
-    elapsed = time.time() - start
+    # Try known endpoint names
+    for api_name in ["/generate_tts_audio", "/generate"]:
+        try:
+            result = client.predict(
+                text[:295],       # text (max 300 chars)
+                None,             # audio_prompt (None = default voice)
+                0.5,              # cfg / pace
+                0.6,              # exaggeration
+                0,                # seed (0 = random)
+                0.8,              # temperature
+                False,            # chunk_vad
+                api_name=api_name
+            )
+            elapsed = time.time() - start
+            audio = extract_audio_path(result)
+            if audio:
+                log(f"Chatterbox voice ready ({elapsed:.1f}s)", "OK")
+                return audio
+        except Exception:
+            continue
 
-    audio = extract_audio_path(result)
-    if audio:
-        log(f"Chatterbox voice ready ({elapsed:.1f}s)", "OK")
-    return audio
+    # Simplest call as last resort
+    try:
+        result = client.predict(text[:295])
+        audio = extract_audio_path(result)
+        if audio:
+            log(f"Chatterbox voice ready ({time.time() - start:.1f}s)", "OK")
+            return audio
+    except Exception as e:
+        log(f"Chatterbox failed: {e}", "WARN")
+
+    return None
 
 
 # ─── Voice Router ────────────────────────────────────────────────────────────
@@ -591,24 +639,30 @@ def build_playground(default_engine="kokoro", animate_face=True):
         return "qwen3", list(QWEN3_VOICES.values())[0]
 
     # ─── Core Pipeline ───
-    def process_message(user_text, chat_history, voice_engine, voice_choice,
-                        speed, do_animate):
-        """Full pipeline: Text → Brain → Voice → Face → Response."""
-        if not user_text or not user_text.strip():
-            return chat_history, None, None, "", ""
-
+    def _run_pipeline(user_text, chat_history, voice_engine, voice_choice,
+                      speed, do_animate):
+        """Shared pipeline: Text → Brain → Voice → Face → Response."""
         chat_history = chat_history or []
         chat_history.append({"role": "user", "content": user_text})
 
         # BRAIN — EVE thinks
-        eve_response = eve_think(user_text, conversation_history)
+        try:
+            eve_response = eve_think(user_text, conversation_history)
+        except Exception as e:
+            log(f"Brain error: {e}", "ERR")
+            eve_response = "I'm having trouble thinking right now... give me a moment and try again?"
+
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": eve_response})
         chat_history.append({"role": "assistant", "content": eve_response})
 
         # VOICE — EVE speaks
         engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
-        audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+        try:
+            audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
+        except Exception as e:
+            log(f"All voice engines failed: {e}", "ERR")
+            audio_path = None
 
         # FACE — EVE animates
         video_path = None
@@ -618,8 +672,25 @@ def build_playground(default_engine="kokoro", animate_face=True):
             except Exception as e:
                 log(f"Face animation skipped: {e}", "WARN")
 
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
-        return chat_history, audio_path, video_path, "", status
+        parts = [f"Voice: {voice_engine}"]
+        if audio_path:
+            parts.append("Audio: OK")
+        else:
+            parts.append("Audio: text-only (voice engines busy)")
+        if do_animate:
+            parts.append(f"Face: {'OK' if video_path else 'skipped'}")
+        status = " | ".join(parts)
+        return chat_history, audio_path, video_path, status
+
+    def process_message(user_text, chat_history, voice_engine, voice_choice,
+                        speed, do_animate):
+        """Full pipeline: Text → Brain → Voice → Face → Response."""
+        if not user_text or not user_text.strip():
+            return chat_history, None, None, "", ""
+
+        chat_history, audio, video, status = _run_pipeline(
+            user_text, chat_history, voice_engine, voice_choice, speed, do_animate)
+        return chat_history, audio, video, "", status
 
     def process_voice(audio, chat_history, voice_engine, voice_choice,
                       speed, do_animate):
@@ -627,30 +698,18 @@ def build_playground(default_engine="kokoro", animate_face=True):
         if audio is None:
             return chat_history, None, None, ""
 
-        user_text = transcribe_audio(audio)
+        try:
+            user_text = transcribe_audio(audio)
+        except Exception as e:
+            log(f"STT error: {e}", "ERR")
+            return chat_history, None, None, "Mic error — try typing instead"
+
         if not user_text or not user_text.strip():
-            return chat_history, None, None, ""
+            return chat_history, None, None, "Couldn't hear you — try again?"
 
-        chat_history = chat_history or []
-        chat_history.append({"role": "user", "content": user_text})
-
-        eve_response = eve_think(user_text, conversation_history)
-        conversation_history.append({"role": "user", "content": user_text})
-        conversation_history.append({"role": "assistant", "content": eve_response})
-        chat_history.append({"role": "assistant", "content": eve_response})
-
-        engine_key, voice_id = _resolve_voice(voice_engine, voice_choice)
-        audio_path = eve_speak(eve_response, engine=engine_key, voice_id=voice_id)
-
-        video_path = None
-        if do_animate and audio_path:
-            try:
-                video_path = eve_animate(portrait_path, audio_path)
-            except Exception as e:
-                log(f"Face animation skipped: {e}", "WARN")
-
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
-        return chat_history, audio_path, video_path, status
+        chat_history, audio_out, video, status = _run_pipeline(
+            user_text, chat_history, voice_engine, voice_choice, speed, do_animate)
+        return chat_history, audio_out, video, status
 
     def clear_all():
         conversation_history.clear()
