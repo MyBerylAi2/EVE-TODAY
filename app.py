@@ -1229,10 +1229,15 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
         log("Generating greeting audio + video...", "PIPE")
         try:
-            greeting_text = "Hey TJ! Give me just a moment to get everything ready so we can talk in real time. I'll be right with you, trust me, I'm worth the wait."
-            audio_path = eve_speak(greeting_text, engine="qwen3")
-            if not audio_path or not os.path.isfile(str(audio_path)):
-                audio_path = eve_speak(greeting_text, engine="kokoro", voice_id="af_heart")
+            greeting_text = "Hey TJ! Give me just a moment to get everything ready so we can talk in real time. I'll be right with you — trust me, I'm worth the wait."
+            # Max realism cascade: Orpheus (most human) → Dia (expressive) → Qwen3 → Kokoro
+            audio_path = None
+            for eng, vid in [("orpheus", "tara"), ("dia", None), ("qwen3", None), ("kokoro", "af_heart")]:
+                audio_path = eve_speak(greeting_text, engine=eng, voice_id=vid)
+                if audio_path and os.path.isfile(str(audio_path)):
+                    log(f"Greeting voice: {eng} (max realism)", "OK")
+                    break
+                audio_path = None
             if audio_path and os.path.isfile(str(audio_path)):
                 _greeting_audio[0] = audio_path
                 log(f"Greeting audio ready: {audio_path}", "OK")
