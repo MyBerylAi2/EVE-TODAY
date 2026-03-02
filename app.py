@@ -648,8 +648,8 @@ def eve_speak(text, engine="kokoro", voice_id=None):
     except Exception as e:
         log(f"{engine} failed: {e}", "WARN")
 
-    # Cascade through fallbacks
-    fallback_order = ["qwen3", "kokoro", "orpheus", "chatterbox"]
+    # Cascade through fallbacks — Orpheus first for max realism
+    fallback_order = ["orpheus", "qwen3", "kokoro", "chatterbox"]
     for fb in fallback_order:
         if fb == engine:
             continue
@@ -1339,18 +1339,27 @@ def build_playground(default_engine="kokoro", animate_face=True):
             return "\n".join(transcript_lines[-10:]) if transcript_lines else ""
 
         def _detect_mood(audio_data, sr):
-            """Simple mood detection from audio characteristics.
-            Returns a mood hint for EVE's brain to adapt to."""
+            """Mood detection from audio — EVE notices how you sound, like Samantha would.
+            Returns a rich mood hint for EVE's brain to adapt emotionally."""
             import numpy as np
             rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
             duration = len(audio_data) / sr
-            if rms < 500:
-                return "quiet/calm"
-            elif rms > 8000:
-                return "energetic/excited"
-            elif duration > 8:
-                return "thoughtful/detailed"
-            return "conversational"
+
+            if rms < 300:
+                return "very quiet, almost whispering — they might be feeling vulnerable or intimate"
+            elif rms < 700:
+                return "soft and calm — relaxed, maybe reflective"
+            elif rms > 10000:
+                return "loud and energetic — they're excited or passionate about something"
+            elif rms > 6000:
+                return "animated and expressive — engaged, having fun"
+            elif duration > 12:
+                return "speaking at length — they have something important on their mind, listen deeply"
+            elif duration > 6:
+                return "thoughtful, taking their time — give a meaningful response"
+            elif duration < 1.5:
+                return "very brief — maybe a yes/no, keep your response light and quick"
+            return "natural conversational tone"
 
         def eve_live_reply(audio_tuple):
             """Real-time voice handler: STT → Brain → TTS → stream audio + update face.
@@ -1407,11 +1416,11 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
             # Brain — stream clause-by-clause for faster first audio
             mood_context = live_history.copy()
-            if mood != "conversational":
-                mood_context.append({
-                    "role": "system",
-                    "content": f"[The user's tone sounds {mood}. Adjust your emotional warmth accordingly.]"
-                })
+            # Always give EVE emotional awareness — she notices everything
+            mood_context.append({
+                "role": "system",
+                "content": f"[You can sense the person's energy: {mood}. Let this color your response naturally — don't mention it explicitly unless it feels right. React like Samantha would.]"
+            })
 
             yield AdditionalOutputs(portrait_path, _random_idle_clip(), _transcript_text(),
                                     "EVE is thinking...")
@@ -1753,20 +1762,20 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
                 voice_engine = gr.Radio(
                     choices=[
+                        "Orpheus (Human)",
                         "Qwen3 (Design)",
                         "Kokoro (Fast)",
-                        "Orpheus (Human)",
                         "Dia (Expressive)",
                         "Chatterbox (Clone)",
                     ],
-                    value="Qwen3 (Design)",
+                    value="Orpheus (Human)",
                     label="Engine",
                     interactive=True,
                 )
 
                 voice_choice = gr.Dropdown(
-                    choices=list(QWEN3_VOICES.keys()),
-                    value="EVE Warm",
+                    choices=list(ORPHEUS_VOICES.keys()),
+                    value="Tara (Conversational)",
                     label="Voice",
                     interactive=True,
                 )
