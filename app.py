@@ -602,21 +602,29 @@ def eve_animate(portrait_path, audio_path):
                 api_name=space_cfg["api"],
             )
             elapsed = time.time() - start
+            log(f"Animation result type={type(result).__name__}: {str(result)[:200]}", "INFO")
 
             video_path = None
-            if isinstance(result, str) and os.path.exists(result):
+            if isinstance(result, str):
                 video_path = result
             elif isinstance(result, dict):
-                video_path = result.get("path") or result.get("video")
-            elif isinstance(result, tuple):
+                # Gradio client returns {'video': '/tmp/...mp4', 'subtitles': ...}
+                video_path = result.get("video") or result.get("path")
+            elif isinstance(result, (tuple, list)):
                 for item in result:
-                    if isinstance(item, str) and os.path.exists(item):
+                    if isinstance(item, str):
                         video_path = item
                         break
+                    if isinstance(item, dict):
+                        video_path = item.get("video") or item.get("path")
+                        if video_path:
+                            break
 
             if video_path:
-                log(f"Face animated via {space_cfg['name']} ({elapsed:.1f}s)", "OK")
-                return video_path
+                log(f"Face animated via {space_cfg['name']} ({elapsed:.1f}s) -> {video_path}", "OK")
+                return str(video_path)
+            else:
+                log(f"Animation returned no extractable video path", "WARN")
         except Exception as e:
             log(f"{space_cfg['name']} failed: {e}", "WARN")
 
@@ -864,11 +872,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
         video_path = None
         if do_animate and audio_path:
             try:
+                log(f"Starting face animation with portrait={portrait_path}, audio={audio_path}", "PIPE")
                 video_path = eve_animate(portrait_path, audio_path)
+                log(f"Face animation result: {video_path}", "OK" if video_path else "WARN")
             except Exception as e:
-                log(f"Face animation skipped: {e}", "WARN")
+                log(f"Face animation error: {type(e).__name__}: {e}", "ERR")
+        elif not do_animate:
+            log("Face animation disabled by user", "INFO")
+        elif not audio_path:
+            log("Face animation skipped — no audio", "WARN")
 
-        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if do_animate else 'Off'}"
+        status = f"Brain: Llama 3.3 70B | Voice: {voice_engine} | Face: {'KDTalker' if video_path else 'Off'}"
 
         # Toggle portrait/video visibility
         if video_path:
