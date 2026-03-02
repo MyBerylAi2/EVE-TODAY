@@ -2,3 +2,5 @@ huggingface_hub>=0.25
 requests
 numpy
 Pillow
+fastrtc
+soundfile
