@@ -330,7 +330,7 @@ def voice_kokoro(text, voice_id="af_heart", speed=0.9):
         client = Client("Remsky/Kokoro-TTS-Zero", token=HF_TOKEN)
         start = time.time()
 
-        result = client.predict(text, voice_id, speed, api_name="/generate")
+        result = client.predict(text, voice_id, speed, api_name="/generate_speech")
         elapsed = time.time() - start
         audio = extract_audio_path(result)
         if audio:
@@ -352,18 +352,19 @@ def voice_qwen3(text, voice_description=None):
     desc = voice_description or "A warm, friendly young woman with a slightly breathy voice, speaking naturally with gentle warmth and presence"
     log(f"Qwen3-TTS: \"{text[:50]}\"...", "PIPE")
 
-    # Method 1: Voice Design Space (natural language → custom voice)
+    # Method 1: Voice Design Space — run_voice_design(text, lang, design)
     try:
         client = get_space_client("qwen3-design")
         start = time.time()
 
-        # Auto-discover API — try common endpoint names
-        for api_name in ["/voice_design", "/generate", "/synthesize", "/predict", None]:
+        # Confirmed: function is run_voice_design(text, lang_disp, design)
+        # Returns (audio_output, status_message)
+        for api_name in ["/run_voice_design", None]:
             try:
                 if api_name:
-                    result = client.predict(text, desc, api_name=api_name)
+                    result = client.predict(text, "English", desc, api_name=api_name)
                 else:
-                    result = client.predict(text, desc)
+                    result = client.predict(text, "English", desc)
                 elapsed = time.time() - start
                 audio = extract_audio_path(result)
                 if audio:
@@ -374,17 +375,18 @@ def voice_qwen3(text, voice_description=None):
     except Exception as e:
         log(f"Qwen3 Voice Design Space: {e}", "WARN")
 
-    # Method 2: Base Qwen3-TTS Space
+    # Method 2: Base Qwen3-TTS Space — run_voice_clone(ref_aud, ref_txt, use_xvec, text, lang)
+    # Without reference audio, try with empty/None to get default voice
     try:
         client = get_space_client("qwen3")
         start = time.time()
 
-        for api_name in ["/generate", "/synthesize", "/predict", None]:
+        for api_name in ["/run_voice_clone", None]:
             try:
                 if api_name:
-                    result = client.predict(text, api_name=api_name)
+                    result = client.predict(None, "", False, text, "English", api_name=api_name)
                 else:
-                    result = client.predict(text)
+                    result = client.predict(text, "English")
                 elapsed = time.time() - start
                 audio = extract_audio_path(result)
                 if audio:
@@ -432,11 +434,18 @@ def voice_orpheus(text, voice_id="tara"):
     client = get_space_client("orpheus")
     start = time.time()
 
-    # Try verified API endpoint names
-    for api_name in ["/generate_speech", "/generate", None]:
+    # Confirmed: /generate_speech with (text, voice, temp, top_p, rep_penalty, max_tokens)
+    for api_name in ["/generate_speech", None]:
         try:
             if api_name:
-                result = client.predict(text, voice_id, api_name=api_name)
+                result = client.predict(
+                    text, voice_id,
+                    0.6,    # temperature
+                    0.95,   # top_p
+                    1.1,    # repetition_penalty
+                    1200,   # max_new_tokens
+                    api_name=api_name,
+                )
             else:
                 result = client.predict(text, voice_id)
             elapsed = time.time() - start
@@ -464,18 +473,18 @@ def voice_dia(text):
     client = get_space_client("dia")
     start = time.time()
 
-    # Dia Space uses "generate_audio" endpoint with multiple params
+    # Confirmed endpoint: /generate_audio with 10 params
     try:
         result = client.predict(
             dia_text,           # text with [S1]/[S2] tags
             "",                 # audio_prompt_text (empty = no cloning)
             None,               # audio_prompt (None = no reference)
-            750,                # max_new_tokens
-            1.0,                # cfg_scale
+            1720,               # max_new_tokens (confirmed default)
+            3.0,                # cfg_scale (confirmed default)
             1.3,                # temperature
             0.95,               # top_p
             35,                 # cfg_filter_top_k
-            1.0,                # speed_factor
+            0.94,               # speed_factor (confirmed default)
             -1,                 # seed (-1 = random)
             api_name="/generate_audio"
         )
@@ -514,17 +523,16 @@ def voice_chatterbox(text):
     client = get_space_client("chatterbox")
     start = time.time()
 
-    # Try known endpoint names
+    # Confirmed: /generate_tts_audio with 6 params (text, ref_wav, exaggeration, temp, seed, cfg)
     for api_name in ["/generate_tts_audio", "/generate"]:
         try:
             result = client.predict(
                 text[:295],       # text (max 300 chars)
-                None,             # audio_prompt (None = default voice)
-                0.5,              # cfg / pace
-                0.6,              # exaggeration
-                0,                # seed (0 = random)
+                None,             # ref_wav (None = default voice)
+                0.5,              # exaggeration (0.5 = neutral)
                 0.8,              # temperature
-                False,            # chunk_vad
+                0,                # seed (0 = random)
+                0.5,              # cfg_weight / pace
                 api_name=api_name
             )
             elapsed = time.time() - start
