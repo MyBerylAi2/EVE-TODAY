@@ -125,32 +125,43 @@ def log(msg, level="INFO"):
 
 
 # ─── Portrait ────────────────────────────────────────────────────────────────
+def _is_real_image(path):
+    """Check if a file is an actual image (not a Git LFS pointer)."""
+    p = Path(path)
+    if not p.exists() or p.stat().st_size < 500:
+        return False
+    with open(p, "rb") as f:
+        header = f.read(16)
+    # Check for PNG/JPEG magic bytes
+    return header[:4] == b'\x89PNG' or header[:2] == b'\xff\xd8'
+
+
 def ensure_portrait():
-    """Get EVE's portrait, downloading if needed."""
-    # Check local cache first
-    if EVE_PORTRAIT_LOCAL.exists():
+    """Get EVE's portrait, downloading if needed. Validates it's a real image."""
+    # Check local cache first — but verify it's not an LFS pointer
+    if EVE_PORTRAIT_LOCAL.exists() and _is_real_image(EVE_PORTRAIT_LOCAL):
         return str(EVE_PORTRAIT_LOCAL)
 
     # Check assets directory
     assets_portrait = SCRIPT_DIR.parent / "assets" / "eve-portrait.png"
-    if assets_portrait.exists():
+    if assets_portrait.exists() and _is_real_image(assets_portrait):
         return str(assets_portrait)
 
-    # Check anywhere in the project
-    for p in ["eve-portrait*", "eve_portrait*"]:
-        found = list(SCRIPT_DIR.glob(f"**/{p}"))
-        if found:
-            return str(found[0])
-        found = list(SCRIPT_DIR.parent.glob(f"**/{p}"))
-        if found:
-            return str(found[0])
-
     # Download from HuggingFace
-    log("Downloading EVE portrait...")
+    log("Downloading EVE portrait (local file is LFS pointer or missing)...")
     import urllib.request
     EVE_PORTRAIT_LOCAL.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(EVE_PORTRAIT_URL, str(EVE_PORTRAIT_LOCAL))
-    log("Portrait cached", "OK")
+
+    if _is_real_image(EVE_PORTRAIT_LOCAL):
+        log("Portrait cached", "OK")
+        return str(EVE_PORTRAIT_LOCAL)
+
+    # Final fallback — generate a placeholder
+    log("Portrait URL also failed, creating placeholder", "WARN")
+    from PIL import Image as PILImage
+    img = PILImage.new("RGB", (512, 512), color=(30, 30, 40))
+    img.save(str(EVE_PORTRAIT_LOCAL))
     return str(EVE_PORTRAIT_LOCAL)
 
 
@@ -985,13 +996,20 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 )
 
                 # ─── 2D to 4D Pipeline ───
+                portrait_upload = gr.Image(
+                    label="Upload Portrait (or use default)",
+                    sources=["upload"],
+                    type="filepath",
+                    height=120,
+                    interactive=True,
+                )
                 btn_2d_to_4d = gr.Button(
                     "2D to 4D",
                     variant="primary",
                     size="lg",
                 )
                 pipeline_status = gr.Markdown(
-                    value="**Pipeline Status**\n\nStage 1: 2D Ready — waiting for launch",
+                    value="**Pipeline Status**\n\nStage 1: 2D Ready — upload an image or press to use default",
                     label="",
                 )
                 with gr.Accordion("Pipeline Results", open=False):
@@ -1064,9 +1082,21 @@ def build_playground(default_engine="kokoro", animate_face=True):
                 )
 
         # ─── 2D to 4D Pipeline Handler ────────────────────────────
-        def run_2d_to_4d():
+        def on_portrait_upload(uploaded_img):
+            """When user uploads an image, show it as the main portrait."""
+            if uploaded_img and os.path.exists(str(uploaded_img)):
+                return gr.Image(value=uploaded_img, visible=True), gr.Video(visible=False)
+            return gr.Image(value=portrait_path, visible=True), gr.Video(visible=False)
+
+        def run_2d_to_4d(uploaded_img):
             """Run the full 2D to 4D pipeline with stage-by-stage updates."""
-            depth_img, enhanced_img, video, status_log = pipeline_2d_to_4d(portrait_path)
+            # Use uploaded image if provided, otherwise default portrait
+            source_path = portrait_path
+            if uploaded_img and os.path.exists(str(uploaded_img)):
+                source_path = str(uploaded_img)
+                log(f"Pipeline using uploaded image: {source_path}", "INFO")
+
+            depth_img, enhanced_img, video, status_log = pipeline_2d_to_4d(source_path)
 
             # If we got a 4D video, also show it as the main EVE video
             eve_vid_update = gr.Video(value=video, visible=True) if video else gr.Video(visible=False)
@@ -1110,10 +1140,17 @@ def build_playground(default_engine="kokoro", animate_face=True):
         # Clear
         clear_btn.click(fn=clear_all, outputs=[chatbot, eve_audio, eve_video, status_text])
 
-        # 2D to 4D pipeline
+        # Portrait upload → update main display
+        portrait_upload.change(
+            fn=on_portrait_upload,
+            inputs=[portrait_upload],
+            outputs=[eve_portrait, eve_video],
+        )
+
+        # 2D to 4D pipeline (uses uploaded image or default)
         btn_2d_to_4d.click(
             fn=run_2d_to_4d,
-            inputs=[],
+            inputs=[portrait_upload],
             outputs=[
                 depth_output,
                 enhanced_output,
