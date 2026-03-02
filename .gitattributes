@@ -38,3 +38,4 @@ voices/chatterbox-seed7.wav filter=lfs diff=lfs merge=lfs -text
 voices/kokoro-natural-female.wav filter=lfs diff=lfs merge=lfs -text
 voices/chatterbox-default-seed42.wav filter=lfs diff=lfs merge=lfs -text
 voices/chatterbox-v2.wav filter=lfs diff=lfs merge=lfs -text
+eve-portrait.jpeg filter=lfs diff=lfs merge=lfs -text
