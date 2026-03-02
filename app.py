@@ -47,6 +47,7 @@ SPACES = {
     "orpheus": {"name": "MohamedRashad/Orpheus-TTS"},
     "dia": {"name": "nari-labs/Dia-1.6B"},
     "chatterbox": {"name": "resembleai/Chatterbox", "url": "https://resembleai-chatterbox.hf.space"},
+    "eden-studio": {"name": "AIBRUH/eden-diffusion-studio"},
 }
 
 # EVE portrait
@@ -568,6 +569,218 @@ def eve_animate(portrait_path, audio_path):
     return video_path
 
 
+# ─── 2D to 4D Pipeline Agents ────────────────────────────────────────────────
+
+def agent_depth(portrait_path):
+    """Depth Agent: depth-anything-v2 via HF Inference API -> depth map image."""
+    from huggingface_hub import InferenceClient
+    from PIL import Image
+    import io
+
+    log("Depth Agent analyzing portrait...", "PIPE")
+    client = InferenceClient(token=HF_TOKEN)
+
+    start = time.time()
+    with open(portrait_path, "rb") as f:
+        image_bytes = f.read()
+
+    result = client.depth_estimation(
+        image=image_bytes,
+        model="depth-anything/Depth-Anything-V2-Large-hf",
+    )
+    elapsed = time.time() - start
+
+    # Result has .depth (PIL Image) and .predicted_depth
+    depth_image = None
+    if hasattr(result, "depth"):
+        depth_image = result.depth
+    elif isinstance(result, Image.Image):
+        depth_image = result
+    elif isinstance(result, dict) and "depth" in result:
+        depth_image = result["depth"]
+        if isinstance(depth_image, bytes):
+            depth_image = Image.open(io.BytesIO(depth_image))
+
+    if depth_image is None:
+        log("Depth Agent: unexpected result format", "ERR")
+        return None
+
+    import tempfile
+    depth_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+    depth_image.save(depth_path)
+
+    log(f"Depth Agent complete ({elapsed:.1f}s) -> {depth_path}", "OK")
+    return depth_path
+
+
+def agent_realism(portrait_path, depth_map_path):
+    """Realism Agent: eden-diffusion-studio fn_index 1 -> enhanced portrait."""
+    from gradio_client import Client, handle_file
+
+    log("Realism Agent enhancing portrait with Juggernaut XL...", "PIPE")
+
+    start = time.time()
+    try:
+        client = Client("AIBRUH/eden-diffusion-studio", token=HF_TOKEN)
+
+        # fn_index 1 = generate_images (SDXL / Juggernaut XL)
+        result = client.predict(
+            "photorealistic portrait of a woman, cinematic lighting, ultra detailed skin texture, "
+            "professional photography, 8k, depth of field",  # prompt
+            "cartoon, illustration, painting, sketch, blurry, low quality",  # negative_prompt
+            30,       # steps
+            7.5,      # guidance_scale
+            1024,     # width
+            1024,     # height
+            -1,       # seed
+            handle_file(portrait_path),  # init_image
+            0.35,     # strength (keep original likeness)
+            fn_index=1,
+        )
+    except Exception as e:
+        log(f"Realism Agent eden-studio failed: {e}", "WARN")
+        # Fallback: try simpler call or return original
+        try:
+            client = Client("AIBRUH/eden-diffusion-studio", token=HF_TOKEN)
+            result = client.predict(
+                "photorealistic portrait, cinematic lighting, ultra detailed",
+                "cartoon, blurry, low quality",
+                handle_file(portrait_path),
+                api_name="/generate_images",
+            )
+        except Exception as e2:
+            log(f"Realism Agent fallback also failed: {e2}", "WARN")
+            log("Realism Agent: using original portrait as fallback", "WARN")
+            return portrait_path
+
+    elapsed = time.time() - start
+
+    # Extract image path from result
+    enhanced_path = None
+    if isinstance(result, str) and os.path.exists(result):
+        enhanced_path = result
+    elif isinstance(result, dict):
+        enhanced_path = result.get("path") or result.get("image")
+    elif isinstance(result, (list, tuple)):
+        for item in result:
+            if isinstance(item, str) and os.path.exists(item):
+                enhanced_path = item
+                break
+            if isinstance(item, dict):
+                p = item.get("path") or item.get("image")
+                if p and os.path.exists(str(p)):
+                    enhanced_path = str(p)
+                    break
+            if isinstance(item, list):
+                for sub in item:
+                    if isinstance(sub, str) and os.path.exists(sub):
+                        enhanced_path = sub
+                        break
+                    if isinstance(sub, dict):
+                        p = sub.get("path") or sub.get("image")
+                        if p and os.path.exists(str(p)):
+                            enhanced_path = str(p)
+                            break
+                if enhanced_path:
+                    break
+
+    if not enhanced_path:
+        log("Realism Agent: could not extract enhanced image, using original", "WARN")
+        return portrait_path
+
+    log(f"Realism Agent complete ({elapsed:.1f}s)", "OK")
+    return enhanced_path
+
+
+def agent_animate_4d(enhanced_portrait_path):
+    """Animation Agent: KDTalker -> animated 4D video using silent intro audio."""
+    log("Animation Agent preparing 4D face animation...", "PIPE")
+
+    # Generate a short intro audio for the animation
+    intro_text = "Hello... I'm EVE. I can see you now."
+    audio_path = eve_speak(intro_text, engine="kokoro", voice_id="af_heart")
+
+    if not audio_path:
+        # Fallback: try other engines
+        audio_path = eve_speak(intro_text, engine="qwen3")
+
+    if not audio_path:
+        log("Animation Agent: no voice engine available for intro", "ERR")
+        return None
+
+    start = time.time()
+    video_path = eve_animate(enhanced_portrait_path, audio_path)
+    elapsed = time.time() - start
+
+    if video_path:
+        log(f"Animation Agent complete ({elapsed:.1f}s) -> 4D video ready", "OK")
+    else:
+        log("Animation Agent: KDTalker returned no video", "ERR")
+
+    return video_path
+
+
+def pipeline_2d_to_4d(portrait_path, progress_callback=None):
+    """Fixed pipeline: 2D -> depth -> realism -> animate.
+
+    Returns (depth_img, enhanced_img, video, status_log).
+    progress_callback(stage, message) is called at each stage for UI updates.
+    """
+    status_lines = []
+
+    def _update(stage, msg):
+        line = f"Stage {stage}: {msg}"
+        status_lines.append(line)
+        log(line, "PIPE")
+        if progress_callback:
+            progress_callback("\n".join(status_lines))
+
+    # Stage 1: 2D — already have portrait
+    _update(1, "2D Portrait Ready ✓")
+
+    # Stage 2: Depth Agent — call depth-anything-v2
+    _update(2, "Depth Agent analyzing portrait...")
+    try:
+        depth_path = agent_depth(portrait_path)
+        if depth_path:
+            _update(2, "Depth Map (2.5D) Complete ✓")
+        else:
+            _update(2, "Depth Map failed — continuing without depth")
+            depth_path = None
+    except Exception as e:
+        _update(2, f"Depth Map error: {str(e)[:60]} — skipping")
+        depth_path = None
+
+    # Stage 3: Realism Agent — call eden-diffusion-studio
+    _update(3, "Realism Agent enhancing with Juggernaut XL...")
+    try:
+        enhanced_path = agent_realism(portrait_path, depth_path)
+        if enhanced_path and enhanced_path != portrait_path:
+            _update(3, "3D Realism Enhancement Complete ✓")
+        else:
+            _update(3, "Realism enhancement skipped — using original")
+            enhanced_path = portrait_path
+    except Exception as e:
+        _update(3, f"Realism error: {str(e)[:60]} — using original")
+        enhanced_path = portrait_path
+
+    # Stage 4: Animation Agent — call KDTalker with enhanced portrait
+    _update(4, "Animation Agent generating 4D face...")
+    try:
+        video_path = agent_animate_4d(enhanced_path)
+        if video_path:
+            _update(4, "4D Animation Complete ✓")
+        else:
+            _update(4, "4D Animation failed — no video generated")
+            video_path = None
+    except Exception as e:
+        _update(4, f"Animation error: {str(e)[:60]}")
+        video_path = None
+
+    final_status = "\n".join(status_lines)
+    return depth_path, enhanced_path, video_path, final_status
+
+
 # ─── Gradio Playground ──────────────────────────────────────────────────────
 def build_playground(default_engine="kokoro", animate_face=True):
     """Build the EVE Playground — large split-pane conversational UI."""
@@ -771,6 +984,33 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     visible=False,
                 )
 
+                # ─── 2D to 4D Pipeline ───
+                btn_2d_to_4d = gr.Button(
+                    "2D to 4D",
+                    variant="primary",
+                    size="lg",
+                )
+                pipeline_status = gr.Markdown(
+                    value="**Pipeline Status**\n\nStage 1: 2D Ready — waiting for launch",
+                    label="",
+                )
+                with gr.Accordion("Pipeline Results", open=False):
+                    depth_output = gr.Image(
+                        label="Stage 2: Depth Map (2.5D)",
+                        height=200,
+                        interactive=False,
+                    )
+                    enhanced_output = gr.Image(
+                        label="Stage 3: Enhanced Portrait (3D)",
+                        height=200,
+                        interactive=False,
+                    )
+                    pipeline_video = gr.Video(
+                        label="Stage 4: 4D Animation",
+                        autoplay=True,
+                        height=200,
+                    )
+
                 # EVE's voice (autoplay)
                 eve_audio = gr.Audio(
                     label="",
@@ -823,6 +1063,24 @@ def build_playground(default_engine="kokoro", animate_face=True):
                     max_lines=1,
                 )
 
+        # ─── 2D to 4D Pipeline Handler ────────────────────────────
+        def run_2d_to_4d():
+            """Run the full 2D to 4D pipeline with stage-by-stage updates."""
+            depth_img, enhanced_img, video, status_log = pipeline_2d_to_4d(portrait_path)
+
+            # If we got a 4D video, also show it as the main EVE video
+            eve_vid_update = gr.Video(value=video, visible=True) if video else gr.Video(visible=False)
+            eve_img_update = gr.Image(visible=False) if video else gr.Image(visible=True)
+
+            return (
+                depth_img,       # depth_output
+                enhanced_img,    # enhanced_output
+                video,           # pipeline_video
+                status_log,      # pipeline_status
+                eve_img_update,  # eve_portrait visibility
+                eve_vid_update,  # eve_video with 4D result
+            )
+
         # ─── Show video when available, portrait when not ────────
         def show_video(video_path):
             if video_path and os.path.exists(str(video_path)):
@@ -851,6 +1109,20 @@ def build_playground(default_engine="kokoro", animate_face=True):
 
         # Clear
         clear_btn.click(fn=clear_all, outputs=[chatbot, eve_audio, eve_video, status_text])
+
+        # 2D to 4D pipeline
+        btn_2d_to_4d.click(
+            fn=run_2d_to_4d,
+            inputs=[],
+            outputs=[
+                depth_output,
+                enhanced_output,
+                pipeline_video,
+                pipeline_status,
+                eve_portrait,
+                eve_video,
+            ],
+        )
 
     # Store Gradio 6 launch kwargs for theme/css
     app._eve_launch_kwargs = _launch_kwargs

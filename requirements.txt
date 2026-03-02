@@ -3,3 +3,4 @@ gradio_client>=1.5
 huggingface_hub>=0.25
 requests
 numpy
+Pillow
